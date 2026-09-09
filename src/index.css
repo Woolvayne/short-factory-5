@@ -1,0 +1,436 @@
+@import url("https://fonts.googleapis.com/css2?family=DM+Mono:wght@300;400;500&family=Manrope:wght@400;500;600;700;800&display=swap");
+@import "tailwindcss";
+
+@theme {
+  --font-display: "Manrope", "Helvetica Neue", -apple-system, BlinkMacSystemFont, sans-serif;
+  --font-mono: "DM Mono", "SF Mono", Menlo, monospace;
+
+  /* Existing utility names remain intact; only their visual meaning changes. */
+  --color-coal-950: #160705;
+  --color-coal-900: #210b08;
+  --color-coal-850: #2a0f0b;
+  --color-coal-800: #371510;
+  --color-coal-700: #552319;
+  --color-coal-600: #713526;
+  --color-coal-400: #ad7463;
+  --color-coal-300: #d8a998;
+  --color-coal-200: #f0d2c5;
+  --color-paper-100: #fff8f2;
+
+  --color-volt-300: #ffc27b;
+  --color-volt-400: #ff982f;
+  --color-volt-500: #f36b1c;
+  --color-volt-600: #d94c12;
+
+  --color-ember-400: #ff694c;
+  --color-ember-500: #ef2f24;
+  --color-ember-600: #be1e18;
+
+  --color-amber-warn: #ffc65c;
+  --color-mint-400: #ffae72;
+  --color-rose-err: #ff5b68;
+
+  --animate-marquee: marquee 32s linear infinite;
+  --animate-led: led 2.2s ease-in-out infinite;
+  --animate-belt: belt 2.4s linear infinite;
+  --animate-scan: scan 9s ease-in-out infinite;
+  --animate-rise: rise 0.75s cubic-bezier(0.16, 1, 0.3, 1) both;
+  --animate-flick: flick 8s ease-in-out infinite;
+  --animate-pulse-heat: pulseHeat 6s ease-in-out infinite;
+}
+
+@keyframes marquee {
+  from { transform: translateX(0); }
+  to { transform: translateX(-50%); }
+}
+
+@keyframes led {
+  0%, 100% { opacity: 1; box-shadow: 0 0 0 3px color-mix(in srgb, currentColor 12%, transparent); }
+  50% { opacity: 0.62; box-shadow: 0 0 0 7px color-mix(in srgb, currentColor 4%, transparent); }
+}
+
+@keyframes belt {
+  from { background-position: 0 0; }
+  to { background-position: 120px 0; }
+}
+
+@keyframes scan {
+  0%, 100% { transform: translateY(-160%); opacity: 0; }
+  45% { opacity: 0.14; }
+  60% { transform: translateY(1600%); opacity: 0; }
+}
+
+@keyframes rise {
+  from { opacity: 0; transform: translateY(24px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+@keyframes flick {
+  0%, 100% { opacity: 0.018; }
+  50% { opacity: 0.032; }
+}
+
+@keyframes pulseHeat {
+  0%, 100% { opacity: 0.28; transform: translateX(-50%) scale(0.96); }
+  50% { opacity: 0.55; transform: translateX(-50%) scale(1.05); }
+}
+
+html {
+  background: var(--color-coal-950);
+  color-scheme: dark;
+  scroll-behavior: smooth;
+}
+
+body {
+  min-height: 100vh;
+  margin: 0;
+  font-family: var(--font-display);
+  color: var(--color-paper-100);
+  background:
+    radial-gradient(circle at 7% 4%, rgba(255, 146, 47, 0.2), transparent 30rem),
+    radial-gradient(circle at 94% 14%, rgba(239, 47, 36, 0.2), transparent 34rem),
+    radial-gradient(circle at 54% 85%, rgba(211, 60, 19, 0.12), transparent 38rem),
+    linear-gradient(145deg, #160705 0%, #230906 48%, #150806 100%);
+  background-attachment: fixed;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  text-rendering: optimizeLegibility;
+  overflow-x: hidden;
+  overscroll-behavior-y: none;
+}
+
+::selection {
+  color: #270b06;
+  background: #ffab58;
+}
+
+::-webkit-scrollbar { width: 11px; height: 11px; }
+::-webkit-scrollbar-track { background: #160705; }
+::-webkit-scrollbar-thumb {
+  background: linear-gradient(180deg, #ff982f, #ef2f24);
+  border: 3px solid #160705;
+  border-radius: 999px;
+}
+
+@layer utilities {
+  .bg-heat {
+    background-image: linear-gradient(135deg, #ffb058 0%, #ff7b25 48%, #ef3024 100%);
+  }
+
+  .bg-heat-soft {
+    background-image: linear-gradient(135deg, rgba(255, 152, 47, 0.14), rgba(239, 47, 36, 0.09));
+  }
+
+  .text-heat {
+    color: transparent;
+    background-image: linear-gradient(100deg, #ffc27b 0%, #ff8c2c 42%, #ff4a31 100%);
+    background-clip: text;
+    -webkit-background-clip: text;
+  }
+
+  .border-heat {
+    border-color: rgba(255, 120, 40, 0.65);
+  }
+
+  /* Soft floating light replaces the old engineering grid. */
+  .bg-blueprint {
+    background-image:
+      radial-gradient(circle at 18% 20%, rgba(255, 176, 88, 0.18), transparent 22%),
+      radial-gradient(circle at 74% 8%, rgba(239, 48, 36, 0.16), transparent 28%),
+      radial-gradient(circle at 52% 56%, rgba(255, 112, 31, 0.08), transparent 34%);
+    background-size: 100% 100%;
+    filter: blur(12px);
+    -webkit-mask-image: linear-gradient(to bottom, black 0%, rgba(0, 0, 0, 0.75) 55%, transparent 100%);
+    mask-image: linear-gradient(to bottom, black 0%, rgba(0, 0, 0, 0.75) 55%, transparent 100%);
+  }
+
+  /* Functional progress strips become light trails, not hazard tape. */
+  .hazard,
+  .hazard-ember {
+    background-image: linear-gradient(90deg, #ffb258, #ff7424 50%, #ef2f24);
+    background-size: 180% 100%;
+  }
+
+  .belt {
+    background-image: linear-gradient(
+      90deg,
+      transparent 0%,
+      rgba(255, 170, 80, 0.12) 25%,
+      rgba(255, 84, 42, 0.55) 50%,
+      rgba(255, 170, 80, 0.12) 75%,
+      transparent 100%
+    );
+    background-size: 240px 100%;
+    animation: var(--animate-belt);
+  }
+
+  .grain::after {
+    content: "";
+    position: fixed;
+    inset: -100%;
+    z-index: 60;
+    pointer-events: none;
+    background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='220' height='220'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='.8' numOctaves='2' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)'/%3E%3C/svg%3E");
+    mix-blend-mode: soft-light;
+    animation: var(--animate-flick);
+  }
+
+  .text-outline {
+    color: rgba(255, 235, 224, 0.05);
+    -webkit-text-stroke: 1.5px rgba(255, 173, 124, 0.62);
+  }
+
+  .mono-label {
+    font-family: var(--font-mono);
+    font-size: 0.65rem;
+    font-weight: 500;
+    letter-spacing: 0.13em;
+    text-transform: uppercase;
+  }
+
+  /* Panels become soft glass surfaces; old mechanical brackets disappear. */
+  .card-bracket {
+    position: relative;
+    overflow: visible;
+    border-radius: 24px !important;
+    background:
+      linear-gradient(145deg, rgba(72, 27, 19, 0.78), rgba(31, 11, 8, 0.9)) !important;
+    border-color: rgba(255, 142, 73, 0.2) !important;
+    box-shadow:
+      0 30px 80px -42px rgba(0, 0, 0, 0.95),
+      inset 0 1px rgba(255, 220, 194, 0.07);
+    backdrop-filter: blur(18px);
+    -webkit-backdrop-filter: blur(18px);
+  }
+
+  .card-bracket::before {
+    content: "";
+    position: absolute;
+    top: 0;
+    left: 32px;
+    right: 32px;
+    width: auto;
+    height: 1px;
+    border: 0;
+    background: linear-gradient(90deg, transparent, rgba(255, 160, 87, 0.75), rgba(239, 47, 36, 0.55), transparent);
+    pointer-events: none;
+  }
+
+  .card-bracket::after { display: none; }
+
+  .glow-volt {
+    box-shadow:
+      0 18px 45px -20px rgba(239, 47, 36, 0.9),
+      0 6px 24px -12px rgba(255, 152, 47, 0.9),
+      inset 0 1px rgba(255, 255, 255, 0.24);
+  }
+}
+
+/* CSS-only component restyle: application behaviour remains untouched. */
+
+/* The header becomes a floating navigation capsule. */
+body > #root > div > header > div:first-child {
+  border: 0 !important;
+  background: transparent !important;
+  padding-top: max(10px, env(safe-area-inset-top));
+}
+
+body > #root > div > header > div:first-child > div {
+  margin-top: 8px;
+  border: 1px solid rgba(255, 157, 88, 0.18);
+  border-radius: 18px;
+  background: rgba(31, 10, 7, 0.72);
+  box-shadow: 0 20px 60px -38px rgba(239, 47, 36, 0.95);
+  backdrop-filter: blur(18px);
+  -webkit-backdrop-filter: blur(18px);
+}
+
+body > #root > div > header > div:first-child > div > div:first-child > div:first-child {
+  border-radius: 11px;
+}
+
+/* Ticker becomes a narrow editorial ribbon. */
+body > #root > div > header > div:nth-child(2) {
+  width: min(1460px, calc(100% - 32px));
+  margin: 8px auto 0;
+  border: 1px solid rgba(255, 163, 92, 0.16) !important;
+  border-radius: 999px;
+  background: rgba(69, 21, 13, 0.62) !important;
+  backdrop-filter: blur(14px);
+  -webkit-backdrop-filter: blur(14px);
+}
+
+body > #root > div > header > div:nth-child(2) span {
+  color: #ffc18a !important;
+  font-weight: 500 !important;
+}
+
+/* Section heads are spacious editorial dividers. */
+.card-bracket > header {
+  margin: 0 20px;
+  padding: 20px 2px 15px !important;
+  border-bottom-color: rgba(255, 160, 93, 0.13) !important;
+}
+
+.card-bracket > header h2 {
+  font-size: 0.78rem !important;
+  letter-spacing: 0.12em !important;
+}
+
+.card-bracket > header + div {
+  padding: 20px !important;
+}
+
+/* Controls are tactile and softly rounded rather than machine-cut. */
+button,
+a[class*="border"],
+input,
+textarea,
+select,
+div[class*="border-dashed"] {
+  border-radius: 12px;
+}
+
+button,
+a {
+  transition:
+    transform 180ms cubic-bezier(0.16, 1, 0.3, 1),
+    border-color 180ms ease,
+    background-color 180ms ease,
+    color 180ms ease,
+    opacity 180ms ease,
+    box-shadow 180ms ease !important;
+}
+
+button:not(:disabled):hover,
+a[class*="border"]:hover {
+  transform: translateY(-1px);
+}
+
+button:not(:disabled):active,
+a[class*="border"]:active {
+  transform: translateY(0) scale(0.985);
+}
+
+input:focus,
+textarea:focus,
+select:focus {
+  box-shadow: 0 0 0 3px rgba(255, 137, 48, 0.12);
+}
+
+/* File drop surfaces receive a gentle inset glow. */
+button[class*="border-dashed"],
+div[class*="border-dashed"] {
+  background:
+    radial-gradient(circle at 50% 10%, rgba(255, 137, 47, 0.09), transparent 48%),
+    rgba(38, 13, 9, 0.55) !important;
+}
+
+video,
+button:has(> div[style*="aspect-ratio"]) {
+  border-radius: 14px;
+}
+
+.bg-heat {
+  border-radius: 12px;
+  box-shadow: 0 12px 28px -17px rgba(239, 47, 36, 0.85);
+}
+
+/* Range sliders become soft pills, still Safari-safe. */
+input[type="range"].sf-range {
+  -webkit-appearance: none;
+  appearance: none;
+  height: 28px;
+  background: transparent;
+  box-shadow: none;
+}
+
+input[type="range"].sf-range::-webkit-slider-runnable-track {
+  height: 5px;
+  border-radius: 999px;
+  background: linear-gradient(
+    to right,
+    #ffad58 0%,
+    #ef3b27 var(--pct, 50%),
+    rgba(129, 67, 48, 0.46) var(--pct, 50%)
+  );
+}
+
+input[type="range"].sf-range::-webkit-slider-thumb {
+  width: 18px;
+  height: 18px;
+  margin-top: -6.5px;
+  border: 3px solid #fff5ed;
+  border-radius: 999px;
+  background: #f04a29;
+  box-shadow: 0 3px 10px rgba(239, 47, 36, 0.55);
+  -webkit-appearance: none;
+  appearance: none;
+}
+
+input[type="range"].sf-range::-moz-range-track {
+  height: 5px;
+  border-radius: 999px;
+  background: rgba(129, 67, 48, 0.46);
+}
+
+input[type="range"].sf-range::-moz-range-progress {
+  height: 5px;
+  border-radius: 999px;
+  background: linear-gradient(90deg, #ffad58, #ef3b27);
+}
+
+input[type="range"].sf-range::-moz-range-thumb {
+  width: 13px;
+  height: 13px;
+  border: 3px solid #fff5ed;
+  border-radius: 999px;
+  background: #f04a29;
+}
+
+/* Safari-safe form resets. */
+input,
+textarea,
+button,
+select {
+  -webkit-appearance: none;
+  appearance: none;
+}
+
+input[type="file"] { display: none; }
+button { cursor: pointer; touch-action: manipulation; }
+button:disabled { cursor: not-allowed; }
+* { -webkit-tap-highlight-color: transparent; }
+
+@media (max-width: 640px) {
+  input,
+  select,
+  textarea { font-size: 16px !important; }
+
+  body > #root > div > header > div:nth-child(2) {
+    width: calc(100% - 20px);
+  }
+
+  .card-bracket {
+    border-radius: 18px !important;
+  }
+
+  .card-bracket > header {
+    margin: 0 14px;
+    padding-top: 16px !important;
+  }
+
+  .card-bracket > header + div {
+    padding: 14px !important;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
+}

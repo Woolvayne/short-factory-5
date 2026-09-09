@@ -1,0 +1,27 @@
+# dependencies
+/node_modules
+
+# build
+/dist
+/dist-ssr
+
+# env
+.env
+.env.local
+.env.*.local
+
+# misc
+.DS_Store
+*.local
+
+# vercel
+.vercel
+
+# supabase
+/supabase/.temp
+
+# logs
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+*.log

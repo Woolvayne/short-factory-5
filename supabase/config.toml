@@ -1,0 +1,14 @@
+# ShortsFactory — Supabase project configuration
+# Replace with `supabase link --project-ref <ref>` output, or leave as-is;
+# the values below that matter are the two function blocks.
+
+project_id = "YOUR_PROJECT_REF"
+
+[functions.tts]
+verify_jwt = false
+
+[functions.generate-batch]
+verify_jwt = false
+
+[functions.check-status]
+verify_jwt = false
