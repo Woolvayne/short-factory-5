@@ -61,8 +61,8 @@ async function bufferGraphQL(apiKey, query, variables = {}) {
 /* ------------------------------------------------------------------ */
 
 const Q_CHANNELS = `
-  query Channels {
-    channels {
+  query Channels($input: ChannelsInput!) {
+    channels(input: $input) {
       id
       name
       service
@@ -76,11 +76,23 @@ locked
 
 /* Fallback shape for tenants whose schema exposes fewer channel fields. */
 const Q_CHANNELS_MIN = `
-  query ChannelsMin {
-    channels {
+  query ChannelsMin($input: ChannelsInput!) {
+    channels(input: $input) {
       id
       name
       service
+    }
+  }
+`;
+
+/* Used to auto-resolve the organizationId that channels()/posts() require,
+   when BUFFER_ORGANIZATION_ID isn't set as an env var. */
+const Q_ACCOUNT_ORGS = `
+  query AccountOrganizations {
+    account {
+      organizations {
+        id
+      }
     }
   }
 `;
@@ -196,12 +208,32 @@ function normalisePost(node, channelsById = {}) {
 /*  High-level operations                                               */
 /* ------------------------------------------------------------------ */
 
-async function loadChannels(apiKey) {
+/* Cached across warm serverless invocations so we don't re-fetch it on every call. */
+let cachedOrganizationId;
+
+/** Resolve the Buffer organizationId: env var wins, otherwise auto-detect the first one on the account. */
+async function resolveOrganizationId(apiKey, envOrganizationId) {
+  if (envOrganizationId) return envOrganizationId;
+  if (cachedOrganizationId) return cachedOrganizationId;
+
+  const data = await bufferGraphQL(apiKey, Q_ACCOUNT_ORGS);
+  const orgs = data.account?.organizations || [];
+  if (!orgs.length) {
+    throw new Error(
+      "Kein Buffer-Organization gefunden. BUFFER_ORGANIZATION_ID manuell in den Vercel-Umgebungsvariablen setzen."
+    );
+  }
+  cachedOrganizationId = orgs[0].id;
+  return cachedOrganizationId;
+}
+
+async function loadChannels(apiKey, organizationId) {
+  const orgId = await resolveOrganizationId(apiKey, organizationId);
   try {
-    const data = await bufferGraphQL(apiKey, Q_CHANNELS);
+    const data = await bufferGraphQL(apiKey, Q_CHANNELS, { input: { organizationId: orgId } });
     return (data.channels || []).map(normaliseChannel);
   } catch {
-    const data = await bufferGraphQL(apiKey, Q_CHANNELS_MIN);
+    const data = await bufferGraphQL(apiKey, Q_CHANNELS_MIN, { input: { organizationId: orgId } });
     return (data.channels || []).map(normaliseChannel);
   }
 }
@@ -300,7 +332,7 @@ export default async function handler(req, res) {
   if (req.method === "OPTIONS") return res.status(204).end();
 
   const apiKey = (process.env.BUFFER_API_KEY || "").trim();
-  const organizationId = (process.env.BUFFER_ORGANIZATION_ID || "").trim() || undefined;
+  let organizationId = (process.env.BUFFER_ORGANIZATION_ID || "").trim() || undefined;
   const hasApiKey = Boolean(apiKey);
 
   /* Status probe works without a key so the UI can explain what's missing. */
@@ -315,7 +347,8 @@ export default async function handler(req, res) {
       });
     }
     try {
-      const channels = await loadChannels(apiKey);
+      organizationId = await resolveOrganizationId(apiKey, organizationId);
+      const channels = await loadChannels(apiKey, organizationId);
       return res.status(200).json({ ok: true, hasApiKey: true, channels });
     } catch (e) {
       return res.status(200).json({
@@ -350,14 +383,24 @@ export default async function handler(req, res) {
   }
 
   try {
+    organizationId = await resolveOrganizationId(apiKey, organizationId);
+  } catch (e) {
+    return res.status(200).json({
+      ok: false,
+      hasApiKey,
+      error: e instanceof Error ? e.message : String(e),
+    });
+  }
+
+  try {
     switch (action) {
       case "channels": {
-        const channels = await loadChannels(apiKey);
+        const channels = await loadChannels(apiKey, organizationId);
         return res.status(200).json({ ok: true, hasApiKey, channels });
       }
 
       case "posts": {
-        const channels = await loadChannels(apiKey);
+        const channels = await loadChannels(apiKey, organizationId);
         const byId = Object.fromEntries(channels.map((c) => [c.id, c]));
         const nodes = await loadPosts(apiKey, {
           organizationId,
@@ -374,7 +417,7 @@ export default async function handler(req, res) {
       }
 
       case "status": {
-        const channels = await loadChannels(apiKey);
+        const channels = await loadChannels(apiKey, organizationId);
         const byId = Object.fromEntries(channels.map((c) => [c.id, c]));
         const nodes = await loadPosts(apiKey, { organizationId, first: 100 });
         const found = nodes.find((n) => n.id === body.postId);
@@ -452,7 +495,7 @@ export default async function handler(req, res) {
       }
 
       case "analytics": {
-        const channels = await loadChannels(apiKey);
+        const channels = await loadChannels(apiKey, organizationId);
         const byId = Object.fromEntries(channels.map((c) => [c.id, c]));
 
         let nodes = [];
