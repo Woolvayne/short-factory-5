@@ -23,12 +23,11 @@ export default async function handler(req, res) {
     return res.status(405).json({ error: "Nur POST erlaubt." });
   }
 
-  if (!process.env.BLOB_READ_WRITE_TOKEN) {
-    return res.status(500).json({
-      error:
-        "Kein Vercel Blob Store verbunden. Im Vercel-Dashboard: Storage → Create Database → Blob, dann dem Projekt zuweisen.",
-    });
-  }
+  // Kein manueller Zugangsdaten-Check hier: @vercel/blob löst sowohl das
+  // klassische BLOB_READ_WRITE_TOKEN als auch die neuere OIDC-Authentifizierung
+  // (VERCEL_OIDC_TOKEN, automatisch bei verknüpften Blob Stores ohne
+  // langlebiges Token) selbst auf. Ein eigener Vorab-Check auf
+  // BLOB_READ_WRITE_TOKEN würde OIDC-Setups fälschlich blockieren.
 
   let body;
   try {
