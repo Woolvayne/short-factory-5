@@ -14,6 +14,7 @@ import {
 } from "lucide-react";
 import { cn } from "../utils/cn";
 import type { LocalRenderItem } from "../lib/types";
+import { uploadClipForBuffer } from "../lib/upload";
 import {
   createPosts,
   formatDateTime,
@@ -94,6 +95,7 @@ export default function BufferPostEditor({
   const [timezone, setTimezone] = useState(prefs.timezone);
 
   const [busy, setBusy] = useState(false);
+  const [uploadStatus, setUploadStatus] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [result, setResult] = useState<{ created: number; failed: number; mode: UiMode } | null>(null);
 
@@ -137,6 +139,7 @@ export default function BufferPostEditor({
     }
     setBusy(true);
     setError(null);
+    setUploadStatus(null);
 
     try {
       const tagList = hashtags.split(/[\s,]+/).map((t) => t.trim()).filter(Boolean);
@@ -145,6 +148,19 @@ export default function BufferPostEditor({
       let slotIdx = 0;
 
       const sources = videos.length > 0 ? videos : targetItems.slice(0, 1);
+
+      /* Buffer/TikTok/Instagram need a public HTTPS URL — blob: URLs only
+         exist inside this browser tab. Upload each finished clip once
+         (cached by index) and reuse that URL for every selected channel. */
+      const publicUrls = new Map<number, string>();
+      let uploaded = 0;
+      for (const item of sources) {
+        if (!item.blob) continue; // no rendered bytes to upload (shouldn't happen for `videos`)
+        setUploadStatus(`Video ${++uploaded}/${sources.length} wird hochgeladen …`);
+        const url = await uploadClipForBuffer(item.blob, `render-${item.index}`, item.mime);
+        publicUrls.set(item.index, url);
+      }
+      setUploadStatus(null);
 
       for (const item of sources) {
         for (const channelId of selected) {
@@ -173,7 +189,7 @@ export default function BufferPostEditor({
             hashtags: tagList,
             mode: bufferMode,
             dueAt,
-            mediaUrl: item.blobUrl,
+            mediaUrl: publicUrls.get(item.index) ?? item.blobUrl,
           });
         }
       }
@@ -185,6 +201,7 @@ export default function BufferPostEditor({
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
     } finally {
+      setUploadStatus(null);
       setBusy(false);
     }
   };
@@ -612,7 +629,7 @@ export default function BufferPostEditor({
                 >
                   {busy ? (
                     <>
-                      <Loader2 className="size-4 animate-spin" /> Sende an Buffer…
+                      <Loader2 className="size-4 animate-spin" /> {uploadStatus ?? "Sende an Buffer…"}
                     </>
                   ) : mode === "now" ? (
                     <>
