@@ -253,22 +253,30 @@ async function loadPosts(apiKey, { organizationId, channelIds, statuses, first =
  * Create one Buffer post. `mode` is shareNow | addToQueue | customScheduled.
  * customScheduled additionally requires an ISO-8601 UTC dueAt.
  */
-async function createPost(apiKey, { text, channelId, mode, dueAt, mediaUrl, thumbnailUrl, title }) {
+async function createPost(apiKey, { text, channelId, mode, dueAt, mediaUrl, title, service }) {
   const input = {
     text,
     channelId,
     schedulingType: "automatic",
     mode,
+    // assets ist ein Pflichtfeld (mind. leeres Array) im aktuellen Schema.
+    assets: [],
   };
   if (mode === "customScheduled" && dueAt) input.dueAt = dueAt;
 
-  /* Media is only accepted when publicly reachable — blob: URLs are skipped. */
+  /* Media ist nur bei öffentlich erreichbaren URLs sinnvoll — blob:-URLs
+     werden übersprungen. Wichtig: Buffer erwartet seit dem Assets-Input-
+     Migration-Update ein Array typisierter Items statt des alten
+     `media`/`assets: { videos: [...] }`-Objekts, und lehnt ein eigenes
+     Thumbnail-Feld auf Video-Assets explizit ab. */
   if (mediaUrl && /^https?:\/\//i.test(mediaUrl)) {
-    input.media = {
-      video: mediaUrl,
-      ...(thumbnailUrl && /^https?:\/\//i.test(thumbnailUrl) ? { thumbnail: thumbnailUrl } : {}),
-      ...(title ? { title } : {}),
-    };
+    input.assets = [{ video: { url: mediaUrl } }];
+  }
+
+  /* YouTube verlangt einen eigenen Titel über das netzwerkspezifische
+     metadata-Feld statt über den normalen Post-Text. */
+  if (service === "youtube" && title) {
+    input.metadata = { youtube: { title } };
   }
 
   const data = await bufferGraphQL(apiKey, M_CREATE_POST, { input });
@@ -432,8 +440,8 @@ export default async function handler(req, res) {
           mode: body.mode || "addToQueue",
           dueAt: body.dueAt,
           mediaUrl: body.mediaUrl,
-          thumbnailUrl: body.thumbnailUrl,
           title: body.title,
+          service: body.service,
         });
         return res.status(200).json({ ok: true, post });
       }
@@ -455,8 +463,8 @@ export default async function handler(req, res) {
               mode: job.mode || "addToQueue",
               dueAt: job.dueAt,
               mediaUrl: job.mediaUrl,
-              thumbnailUrl: job.thumbnailUrl,
               title: job.title,
+              service: job.service,
             });
             results.push({
               ok: true,
