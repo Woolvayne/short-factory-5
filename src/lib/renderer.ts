@@ -270,8 +270,23 @@ export async function renderLocal(opts: RenderJobOptions): Promise<LocalRenderRe
     }
 
     /* ---- recorder */
-    const fps = Math.max(24, Math.min(60, s.fps));
-    const canvasStream = canvas.captureStream(fps);
+    const fps = Math.max(24, Math.min(60, Math.round(s.fps)));
+    /* `captureStream(fps)` sounds like it guarantees a constant frame rate,
+       but it actually re-samples the canvas on the browser's own schedule
+       (tied to the display refresh rate / rAF timing), which produces a
+       *variable* frame rate container. TikTok's ingestion explicitly
+       validates for a constant rate and rejects the result with "frame
+       rate doesn't meet requirements" even when the nominal fps looks
+       fine. Fix: capture in manual mode (`captureStream()` with no
+       argument) and push exactly one frame per fixed-interval tick via
+       `track.requestFrame()`, driven by a plain `setInterval` instead of
+       `requestAnimationFrame` (which is throttled/variable across
+       devices and display Hz). This yields evenly spaced frames and a
+       properly constant frame rate in the recorded file. */
+    const canvasStream = canvas.captureStream();
+    const videoTrack = canvasStream.getVideoTracks()[0] as MediaStreamTrack & {
+      requestFrame?: () => void;
+    };
     const mixed = new MediaStream([
       ...canvasStream.getVideoTracks(),
       ...dest.stream.getAudioTracks(),
@@ -322,8 +337,8 @@ export async function renderLocal(opts: RenderJobOptions): Promise<LocalRenderRe
       }
     };
 
-    let raf = 0;
-    const loop = () => {
+    let timer: number | undefined;
+    const tick = () => {
       /* keep the playhead inside the clip window */
       if (video.currentTime >= segEnd - 0.06 || video.ended) {
         try {
@@ -332,7 +347,11 @@ export async function renderLocal(opts: RenderJobOptions): Promise<LocalRenderRe
         } catch { /* noop */ }
       }
       drawFrame();
-      if (ac.currentTime < endAt + 0.1) raf = requestAnimationFrame(loop);
+      videoTrack.requestFrame?.();
+      if (ac.currentTime >= endAt + 0.1 && timer !== undefined) {
+        window.clearInterval(timer);
+        timer = undefined;
+      }
     };
 
     try {
@@ -375,7 +394,8 @@ export async function renderLocal(opts: RenderJobOptions): Promise<LocalRenderRe
       }
     }
     recorder.start(250);
-    raf = requestAnimationFrame(loop);
+    tick(); // draw + capture the very first frame immediately
+    timer = window.setInterval(tick, 1000 / fps);
 
     const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
     while (ac.currentTime < endAt) {
@@ -384,8 +404,9 @@ export async function renderLocal(opts: RenderJobOptions): Promise<LocalRenderRe
       await sleep(120);
     }
 
-    cancelAnimationFrame(raf);
+    if (timer !== undefined) window.clearInterval(timer);
     drawFrame();
+    videoTrack.requestFrame?.();
     recorder.stop();
     await stopped;
     opts.onProgress?.(1);
