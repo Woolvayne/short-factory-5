@@ -83,6 +83,10 @@ export interface Settings {
   clipSkipOutro: number;
   clipLengthMode: "auto" | "fixed";
   clipFixedLength: number;
+
+  /* ---- publishing ---- */
+  defaultVideoDescription: string;
+  defaultHashtags: string;
 }
 
 const STORE_KEY = "shortsfactory.settings.v3";
@@ -109,7 +113,7 @@ export const DEFAULT_SETTINGS: Settings = {
   captionShadow: true,
 
   quality: "auto",
-  fps: 30,
+  fps: 60,
   bitrate: "med",
   vignette: true,
   zoomEffect: false,
@@ -140,6 +144,11 @@ export const DEFAULT_SETTINGS: Settings = {
   clipSkipOutro: 5,
   clipLengthMode: "auto",
   clipFixedLength: 35,
+
+  defaultVideoDescription: `You won't believe how this story ends...
+Stay until the end because the plot twist is INSANE.
+Would you have done the same?`,
+  defaultHashtags: "#reddit #redditstories #storytime #stories #fyp",
 };
 
 export function loadSettings(): Settings {
