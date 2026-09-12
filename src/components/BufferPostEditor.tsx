@@ -265,10 +265,18 @@ export default function BufferPostEditor({
                 : `${result.created} erfolgreich · ${result.failed} fehlgeschlagen`}
             </h4>
             {result.failed > 0 && (
-              <p className="mx-auto mt-2 max-w-md font-mono text-[10.5px] leading-relaxed text-rose-err">
-                ❌ Fehlgeschlagene Posts sind im Kalender rot markiert und können dort erneut
-                versucht werden.
-              </p>
+              <div className="mx-auto mt-2 max-w-md space-y-2">
+                {error && (
+                  <div className="flex items-start gap-2 border border-rose-err/50 bg-rose-err/10 px-3 py-2.5 text-left">
+                    <AlertTriangle className="mt-0.5 size-4 shrink-0 text-rose-err" />
+                    <p className="font-mono text-[10.5px] leading-relaxed text-rose-err">{error}</p>
+                  </div>
+                )}
+                <p className="font-mono text-[10.5px] leading-relaxed text-rose-err">
+                  ❌ Fehlgeschlagene Posts sind im Kalender rot markiert und können dort erneut
+                  versucht werden.
+                </p>
+              </div>
             )}
             <div className="mt-6 flex flex-wrap justify-center gap-3">
               <button

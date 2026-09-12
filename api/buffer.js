@@ -454,18 +454,43 @@ export default async function handler(req, res) {
           return res.status(400).json({ ok: false, error: "Keine Posts übergeben." });
         }
 
+        const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+        const isRateLimit = (msg) => /rate.?limit|too many requests|429/i.test(String(msg || ""));
+
         const results = [];
-        for (const job of jobs) {
+        for (let i = 0; i < jobs.length; i++) {
+          const job = jobs[i];
+          /* Kleine Pause zwischen aufeinanderfolgenden Posts: 10 Anfragen
+             ohne Abstand können Buffers Rate-Limit auslösen, was sich
+             bisher als stiller Teilausfall zeigte (nur 3-4 von 10 kamen
+             durch), ohne dass der Grund für den Nutzer sichtbar war. */
+          if (i > 0) await sleep(400);
+
           try {
-            const post = await createPost(apiKey, {
-              text: job.text || "",
-              channelId: job.channelId,
-              mode: job.mode || "addToQueue",
-              dueAt: job.dueAt,
-              mediaUrl: job.mediaUrl,
-              title: job.title,
-              service: job.service,
-            });
+            let post;
+            try {
+              post = await createPost(apiKey, {
+                text: job.text || "",
+                channelId: job.channelId,
+                mode: job.mode || "addToQueue",
+                dueAt: job.dueAt,
+                mediaUrl: job.mediaUrl,
+                title: job.title,
+                service: job.service,
+              });
+            } catch (e) {
+              if (!isRateLimit(e instanceof Error ? e.message : e)) throw e;
+              await sleep(2000); // einmaliger Retry nach Rate-Limit
+              post = await createPost(apiKey, {
+                text: job.text || "",
+                channelId: job.channelId,
+                mode: job.mode || "addToQueue",
+                dueAt: job.dueAt,
+                mediaUrl: job.mediaUrl,
+                title: job.title,
+                service: job.service,
+              });
+            }
             results.push({
               ok: true,
               localId: job.localId,
@@ -485,11 +510,23 @@ export default async function handler(req, res) {
         }
 
         const failed = results.filter((r) => !r.ok).length;
+        /* Bisher gab es hier kein `error`-Feld, obwohl das Frontend genau
+           danach sucht (res.error) — dadurch blieb der echte Fehlschlags-
+           grund (z.B. Buffer-Warteschlangenlimit, ungültiges Asset, o.ä.)
+           für den Nutzer unsichtbar, er sah nur "X fehlgeschlagen". */
+        const firstError = results.find((r) => !r.ok)?.error;
+        const distinctErrors = [...new Set(results.filter((r) => !r.ok).map((r) => r.error))];
         return res.status(200).json({
           ok: failed < results.length,
           created: results.filter((r) => r.ok).length,
           failed,
           results,
+          error:
+            failed > 0
+              ? distinctErrors.length > 1
+                ? `${failed} Posts fehlgeschlagen, z.B.: ${firstError}`
+                : firstError
+              : undefined,
         });
       }
 
