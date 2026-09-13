@@ -24,6 +24,8 @@ export interface StoredAsset {
     width?: number;
     height?: number;
     duration?: number;
+    /** measured source frame rate — decides the automatic quality boost */
+    fps?: number | null;
     selected?: boolean;
   };
   createdAt: number;

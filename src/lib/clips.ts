@@ -34,6 +34,8 @@ export interface ClipSource {
   height: number;
   size?: number;
   portrait: boolean;
+  /** measured source frame rate — drives the automatic quality boost */
+  fps: number | null;
 }
 
 export interface PlatformInfo {
@@ -84,7 +86,7 @@ export const looksLikeDirectVideo = (url: string) =>
 /** Probe any playable URL for dimensions + duration. */
 export function probeUrl(
   url: string
-): Promise<{ width: number; height: number; duration: number }> {
+): Promise<{ width: number; height: number; duration: number; fps?: number | null }> {
   return new Promise((resolve, reject) => {
     const video = document.createElement("video");
     video.preload = "metadata";

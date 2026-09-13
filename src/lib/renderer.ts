@@ -1,14 +1,16 @@
 /**
- * Local renderer — composites background clip + neural voice + quiet music
- * + word-synced captions onto a 9:16 canvas, captures it with MediaRecorder,
- * then re-encodes with ffmpeg.wasm to force a genuinely constant frame rate
- * (see cfr.ts) before handing back the final file. No server, no cloud —
- * everything runs in the browser. Safari-first (prefers MP4).
+ * Local renderer — paints the Reddit intro card, then composites the
+ * background clip + neural voice + quiet music + word-synced captions onto a
+ * 9:16 canvas, captures it with MediaRecorder, and re-encodes with ffmpeg.wasm
+ * to force a genuinely constant 60 FPS (see cfr.ts + quality.ts) before
+ * handing back the final file. No server, no cloud — everything runs in the
+ * browser. Safari-first (prefers MP4).
  */
 
 import { buildCues, cueAt, type Cue, type WordTs } from "./tts";
 import type { Settings } from "./settings";
-import { resolveBitrate, resolveCaptionLook } from "./settings";
+import { TARGET_FPS, introDuration, resolveBitrate, resolveCaptionLook } from "./settings";
+import { drawRedditIntroCard, hashSeed } from "./intro";
 import { forceConstantFrameRate } from "./cfr";
 
 export interface RenderJobOptions {
@@ -23,6 +25,12 @@ export interface RenderJobOptions {
   height: number;
   audioCtx: AudioContext;
   settings: Settings;
+  /** shown on the Reddit intro card — the unit's own story title */
+  introTitle?: string;
+  /** measured frame rate of the source, for the auto quality boost */
+  sourceFps?: number | null;
+  /** true when quality was lifted automatically because the source was < 60 FPS */
+  qualityBoost?: boolean;
   onProgress?: (ratio: number) => void;
   signal?: { cancelled: boolean };
 }
@@ -31,6 +39,11 @@ export interface LocalRenderResult {
   blob: Blob;
   mimeType: string;
   duration: number;
+  /** always exactly 60 — the delivered file is CFR by construction */
+  fps: number;
+  /** seconds of intro card prepended to the story (0 when disabled) */
+  introSeconds: number;
+  qualityBoost: boolean;
 }
 
 const MIME_CANDIDATES = [
@@ -159,6 +172,25 @@ function drawCover(
   }
 }
 
+/** The full-screen Reddit card that opens every short. */
+function drawIntroFrame(
+  ctx: CanvasRenderingContext2D,
+  w: number,
+  h: number,
+  s: Settings,
+  title: string | undefined,
+  progress: number
+): void {
+  const text = (title ?? "").trim() || "Reddit Story";
+  drawRedditIntroCard(ctx, w, h, {
+    title: text,
+    subreddit: (s.introSubreddit ?? "").trim() || "r/Stories",
+    hook: (s.introHook ?? "").trim(),
+    progress,
+    seed: hashSeed(text),
+  });
+}
+
 export async function renderLocal(opts: RenderJobOptions): Promise<LocalRenderResult> {
   const { width: w, height: h, audioCtx: ac, settings: s } = opts;
 
@@ -230,7 +262,11 @@ export async function renderLocal(opts: RenderJobOptions): Promise<LocalRenderRe
       }
     }
 
-    const duration = Math.max(voiceBuf.duration + Math.max(0, s.tailPadding), 3);
+    /* the intro card runs first, then the story — the voice (and therefore the
+       captions) is offset by exactly the card length */
+    const intro = introDuration(s);
+    const storyLen = Math.max(voiceBuf.duration + Math.max(0, s.tailPadding), 3);
+    const duration = storyLen + intro;
     const cues: Cue[] = s.captionsOn
       ? buildCues(opts.words, voiceBuf.duration + 0.4, s.wordsPerCue)
       : [];
@@ -273,7 +309,9 @@ export async function renderLocal(opts: RenderJobOptions): Promise<LocalRenderRe
     }
 
     /* ---- recorder */
-    const fps = Math.max(24, Math.min(60, s.fps));
+    /* exactly 60 FPS — a policy, not a preference (see quality.ts). The canvas
+       is captured at 60 and the CFR pass below guarantees it in the file. */
+    const fps = TARGET_FPS;
     const canvasStream = canvas.captureStream(fps);
     const mixed = new MediaStream([
       ...canvasStream.getVideoTracks(),
@@ -307,44 +345,66 @@ export async function renderLocal(opts: RenderJobOptions): Promise<LocalRenderRe
       window.setTimeout(done, 3000);
     });
 
-    /* ---- run */
-    const startAt = ac.currentTime + 0.25;
+    /* ---- run
+       the pre-roll is deliberately short: MediaRecorder starts on this tick, so
+       the card is already fading in on the first captured frame instead of the
+       render opening on a strip of black */
+    const startAt = ac.currentTime + 0.12;
+    const voiceAt = startAt + intro;
     const endAt = startAt + duration;
+    /* the clip stays parked on its first frame while the card is up, so the
+       footage starts moving exactly when the narrator does */
+    let clipRunning = intro <= 0;
 
     const drawFrame = () => {
       const t = Math.max(0, ac.currentTime - startAt);
-      const zoom = s.zoomEffect ? 1 + 0.06 * Math.min(1, t / Math.max(1, duration)) : 1;
+
+      if (intro > 0 && t < intro) {
+        drawIntroFrame(ctx, w, h, s, opts.introTitle, intro > 0 ? t / intro : 1);
+        return;
+      }
+
+      const at = t - intro;
+      const zoom = s.zoomEffect ? 1 + 0.06 * Math.min(1, at / Math.max(1, storyLen)) : 1;
       if (video.readyState >= 2) drawCover(ctx, video, w, h, zoom, s.vignette);
       else {
         ctx.fillStyle = "#000";
         ctx.fillRect(0, 0, w, h);
       }
       if (s.captionsOn) {
-        const cue = cueAt(cues, t);
+        const cue = cueAt(cues, at);
         if (cue) drawCaption(ctx, cue.text, w, h, s);
       }
     };
 
     let raf = 0;
     const loop = () => {
-      /* keep the playhead inside the clip window */
-      if (video.currentTime >= segEnd - 0.06 || video.ended) {
+      const t = ac.currentTime - startAt;
+      if (!clipRunning) {
+        if (t >= intro) {
+          clipRunning = true;
+          video.play().catch(() => { /* autoplay refused — keep drawing */ });
+        }
+      } else if (video.currentTime >= segEnd - 0.06 || video.ended) {
+        /* keep the playhead inside the clip window */
         try {
           video.currentTime = segStart;
-          void video.play();
+          video.play().catch(() => {});
         } catch { /* noop */ }
       }
       drawFrame();
       if (ac.currentTime < endAt + 0.1) raf = requestAnimationFrame(loop);
     };
 
-    try {
-      await video.play();
-    } catch {
-      /* muted + playsinline should be allowed; continue regardless */
+    if (clipRunning) {
+      try {
+        await video.play();
+      } catch {
+        /* muted + playsinline should be allowed; continue regardless */
+      }
     }
 
-    voiceSrc.start(startAt);
+    voiceSrc.start(voiceAt);
     if (musicSrc && musicGain) {
       /* music start point: beginning · after intro · random · custom offset */
       const musicLen = musicBuf?.duration ?? 0;
@@ -361,10 +421,10 @@ export async function renderLocal(opts: RenderJobOptions): Promise<LocalRenderRe
         const base = s.musicVolume;
         const ducked = Math.max(0.0001, base * (1 - Math.min(0.95, s.duckingAmount ?? 0.6)));
         const ramp = Math.max(0.05, s.duckingSpeed ?? 0.35);
-        const speechEnd = startAt + voiceBuf.duration;
+        const speechEnd = voiceAt + voiceBuf.duration;
         musicGain.gain.setValueAtTime(base, startAt);
-        musicGain.gain.linearRampToValueAtTime(ducked, startAt + ramp);
-        musicGain.gain.setValueAtTime(ducked, Math.max(startAt + ramp, speechEnd));
+        musicGain.gain.linearRampToValueAtTime(ducked, voiceAt + ramp);
+        musicGain.gain.setValueAtTime(ducked, Math.max(voiceAt + ramp, speechEnd));
         musicGain.gain.linearRampToValueAtTime(base, speechEnd + ramp);
       }
 
@@ -410,9 +470,11 @@ export async function renderLocal(opts: RenderJobOptions): Promise<LocalRenderRe
     let finalBlob = rawBlob;
     let finalMime = rawBlob.type || mimeType;
     try {
-      finalBlob = await forceConstantFrameRate(rawBlob, Math.round(fps), (p) =>
-        opts.onProgress?.(0.92 + p * 0.08)
-      );
+      finalBlob = await forceConstantFrameRate(rawBlob, {
+        fps: TARGET_FPS,
+        boost: opts.qualityBoost === true,
+        onProgress: (p) => opts.onProgress?.(0.92 + p * 0.08),
+      });
       finalMime = "video/mp4";
     } catch (e) {
       /* If the CFR pass itself fails for some reason (e.g. ffmpeg-core
@@ -422,7 +484,14 @@ export async function renderLocal(opts: RenderJobOptions): Promise<LocalRenderRe
     }
 
     opts.onProgress?.(1);
-    return { blob: finalBlob, mimeType: finalMime, duration };
+    return {
+      blob: finalBlob,
+      mimeType: finalMime,
+      duration,
+      fps: TARGET_FPS,
+      introSeconds: intro,
+      qualityBoost: opts.qualityBoost === true,
+    };
   } finally {
     cleanup();
   }

@@ -7,6 +7,8 @@
  * or the network is down; Buffer stays the source of truth whenever reachable.
  */
 
+import { FIXED_HASHTAGS_STRING } from "./settings";
+
 export type BufferMode = "shareNow" | "addToQueue" | "customScheduled";
 
 export type PostStatus =
@@ -81,7 +83,7 @@ export interface BufferPrefs {
 
 export const DEFAULT_PREFS: BufferPrefs = {
   selectedChannelIds: [],
-  defaultHashtags: "#shorts #viral #redditstories #storytime #fyp",
+  defaultHashtags: FIXED_HASHTAGS_STRING,
   postsPerDay: 2,
   preferredTimes: ["06:00", "20:00"],
   planDays: 5,

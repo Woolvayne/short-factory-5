@@ -3,6 +3,53 @@
  * API keys are never sent anywhere except the matching LLM endpoint.
  */
 
+/* ------------------------------------------------------------------ */
+/*  Delivery policy — deliberately NOT user-configurable               */
+/* ------------------------------------------------------------------ */
+
+/** Every short is delivered at exactly this frame rate (see quality.ts). */
+export const TARGET_FPS = 60;
+
+/** Anything measured below this counts as "the source has too few frames". */
+export const LOW_FPS_CEILING = 57;
+
+/**
+ * The description attached to EVERY finished video when it goes out through
+ * Buffer or Zernio. Fixed on purpose — the whole point is that no short ever
+ * ships without the hook, so it is not editable in the post editors and any
+ * value stored by an older build is overwritten on load.
+ */
+export const FIXED_VIDEO_DESCRIPTION = [
+  "You won't believe how this story ends...",
+  "",
+  "Stay until the end because the plot twist is INSANE.",
+  "",
+  "Would you have done the same?",
+  "",
+  "#reddit #redditstories #storytime",
+  "",
+  "#stories #fyp",
+].join("\n");
+
+/** The hashtag block of the fixed description, for platforms with a tag field. */
+export const FIXED_HASHTAGS: string[] = FIXED_VIDEO_DESCRIPTION
+  .split(/\s+/)
+  .filter((t) => t.startsWith("#"));
+
+export const FIXED_HASHTAGS_STRING = FIXED_HASHTAGS.join(" ");
+
+export const INTRO_SECONDS_MIN = 0.3;
+export const INTRO_SECONDS_MAX = 3;
+
+export const clampIntroSeconds = (v: number): number =>
+  Number.isFinite(v)
+    ? Math.min(INTRO_SECONDS_MAX, Math.max(INTRO_SECONDS_MIN, Math.round(v * 10) / 10))
+    : 1.5;
+
+/** How long the Reddit intro card runs for this settings set (0 = off). */
+export const introDuration = (s: Settings): number =>
+  s.introEnabled ? clampIntroSeconds(s.introSeconds) : 0;
+
 export type StoryStyle =
   | "aita"
   | "revenge"
@@ -48,11 +95,20 @@ export interface Settings {
 
   /* ---- video ---- */
   quality: Quality;
+  /** legacy field — the renderer always delivers TARGET_FPS (60). */
   fps: number;
   bitrate: Bitrate;
   vignette: boolean;
   zoomEffect: boolean;
   tailPadding: number; // seconds of silence after the voice
+  /** lift resolution/bitrate automatically when the source has < 60 FPS */
+  fpsAutoBoost: boolean;
+
+  /* ---- reddit intro card ---- */
+  introEnabled: boolean;
+  introSeconds: number;
+  introSubreddit: string;
+  introHook: string;
 
   /* ---- video extras (opt-in) ---- */
   aspectRatio: AspectRatio;
@@ -113,11 +169,17 @@ export const DEFAULT_SETTINGS: Settings = {
   captionShadow: true,
 
   quality: "auto",
-  fps: 60,
+  fps: TARGET_FPS,
   bitrate: "med",
   vignette: true,
   zoomEffect: false,
   tailPadding: 0.6,
+  fpsAutoBoost: true,
+
+  introEnabled: true,
+  introSeconds: 1.5,
+  introSubreddit: "r/Stories",
+  introHook: "You won't believe how this story ends...",
 
   aspectRatio: "9:16",
   captionStyle: "standard",
@@ -145,20 +207,31 @@ export const DEFAULT_SETTINGS: Settings = {
   clipLengthMode: "auto",
   clipFixedLength: 35,
 
-  defaultVideoDescription: `You won't believe how this story ends...
-Stay until the end because the plot twist is INSANE.
-Would you have done the same?`,
-  defaultHashtags: "#reddit #redditstories #storytime #stories #fyp",
+  defaultVideoDescription: FIXED_VIDEO_DESCRIPTION,
+  defaultHashtags: FIXED_HASHTAGS_STRING,
 };
 
 export function loadSettings(): Settings {
+  let merged: Settings;
   try {
     const raw = localStorage.getItem(STORE_KEY);
-    if (!raw) return { ...DEFAULT_SETTINGS };
-    return { ...DEFAULT_SETTINGS, ...(JSON.parse(raw) as Partial<Settings>) };
+    merged = raw
+      ? { ...DEFAULT_SETTINGS, ...(JSON.parse(raw) as Partial<Settings>) }
+      : { ...DEFAULT_SETTINGS };
   } catch {
-    return { ...DEFAULT_SETTINGS };
+    merged = { ...DEFAULT_SETTINGS };
   }
+
+  /* Two values are policy, not preference — re-assert them so a stored
+     settings blob from an older build can never ship a 24/30 FPS file or a
+     short without the standard description. */
+  return {
+    ...merged,
+    fps: TARGET_FPS,
+    defaultVideoDescription: FIXED_VIDEO_DESCRIPTION,
+    defaultHashtags: FIXED_HASHTAGS_STRING,
+    introSeconds: clampIntroSeconds(merged.introSeconds),
+  };
 }
 
 export function saveSettings(s: Settings): void {

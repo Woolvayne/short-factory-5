@@ -1,7 +1,8 @@
 # ShortsFactory — Clip Mill Edition
 
 **One clip in. Ten shorts out.** A video assembly line that runs **100 % in your
-browser**: no server, no cloud render farm, no ffmpeg. Feed it one long
+browser**: no server, no cloud render farm — just a local ffmpeg.wasm pass for
+the final constant-frame-rate encode. Feed it one long
 background video, get ten different moments — each with its own AI story,
 neural voice and word-synced captions — then press **Render**.
 
@@ -52,8 +53,58 @@ copyright. The panel shows the legal one-step alternative:
 | **AI** | Qwen + Mistral keys (localStorage only), story genre (AITA · petty revenge · confession · unsettling · wholesome · workplace · custom instruction), story length ~110–280 words, creativity/temperature |
 | **VOICE** | 12 Edge neural voices, speaking rate ±40 %, pitch ±20 Hz, voice volume, music-bed volume, music fade-out, tail padding |
 | **CAPTIONS** | On/off, 4 style presets, 1–5 words per cue, colour swatches + custom picker, text size, vertical position, outline weight, uppercase, drop shadow — with a **live preview** |
-| **VIDEO** | Resolution (auto / 540 / 720 / 1080), frame rate 24·30·60, bitrate, vignette, slow Ken-Burns zoom |
+| **VIDEO** | Resolution (auto / 540 / 720 / 1080), **frame rate fixed at 60 FPS**, bitrate, vignette, slow Ken-Burns zoom, **Auto-Qualität bei <60-FPS-Quellen**, Intro-Karte, fixe Videobeschreibung |
 | **CLIPS** | Distribution mode, clip length mode + fixed length, skip intro, skip outro |
+
+## Delivery rules (nicht verhandelbar)
+
+Drei Dinge gelten für **jeden** Clip, egal was in den Settings steht:
+
+### 1 · Exakt 60 FPS
+
+`src/lib/settings.ts` → `TARGET_FPS = 60`. Der Regler 24/30 ist weg; gespeicherte
+Alt-Einstellungen werden beim Laden auf 60 normalisiert. Der Weg dorthin:
+
+* Canvas-Capture mit `captureStream(60)`
+* After-Pass in `src/lib/cfr.ts`: `ffmpeg -r 60 -vsync cfr` → **echt konstante**
+  Frame-Abstände (kein VFR, wie es Browser bei Rucklern/GC-Pausen sonst produzieren)
+* `libx264 -preset ultrafast -crf 20`, `yuv420p`, `+faststart` → TikTok-/Reels-tauglich
+
+### 2 · Quelle zu langsam? Qualität automatisch hoch
+
+`src/lib/media.ts → measureVideoFps()` misst die Bildrate des Uploads real
+(`requestVideoFrameCallback` über ~0,85 s Wiedergabe, Fallback
+`getVideoPlaybackQuality`, Fallback „unbekannt“ = kein Boost). Liegt die Quelle
+unter `LOW_FPS_CEILING` (57), hebt `src/lib/quality.ts → planRenderQuality()` pro
+Einheit an:
+
+| Quelle | Auflösung | Bitrate | Encoder |
+| --- | --- | --- | --- |
+| ≥ 57 FPS | wie eingestellt | wie eingestellt | CRF 20 |
+| < 57 FPS (24/25/30) | einen Schritt rauf (Desktop → 1080p, Handy → 720p) | eine Stufe rauf | **CRF 17 + Unsharp** |
+
+Der Boost ist sichtbar: Clip-Mill zeigt die gemessene FPS der Quelle, fertige
+Einheiten bekommen ein `60 FPS`- und ein `BOOST`-Badge. Abschaltbar unter
+Settings → VIDEO → „AUTO-QUALITÄT BEI WENIGER QUELLEN-FPS".
+
+### 3 · Jedes Video startet mit der Reddit-Intro-Karte
+
+`src/lib/intro.ts` malt eine Vollbild-Karte im Reddit-Look auf dieselbe Canvas —
+Avatar + `r/Stories`-Zeile, **der Titel der jeweiligen Story**, die Hook-Zeile
+und eine Up-/Comment-/Share-Zeile mit stabilen (aus dem Titel abgeleiteten)
+Zahlen. Standardmäßig **1,5 s**, dann weicht die Karte zum Clip.
+
+* Stimme, Untertitel **und** Clip-Fenster starten um die Intro-Dauer versetzt —
+  der Hintergrund-Clip läuft also nicht 1,5 s „leer" mit, sondern setzt exakt mit
+  dem ersten Wort ein
+* einstellbar: An/Aus, Dauer 0,3–3,0 s, Subreddit-Zeile, Hook-Text (Live-Loop-Vorschau in den Settings)
+
+### 4 · Einheitliche Videobeschreibung
+
+`FIXED_VIDEO_DESCRIPTION` in `src/lib/settings.ts` wird **jedes** Video beim
+Posten über Buffer **und** Zernio mit exakt diesem Text (inkl. Leerzeilen und
+beider Hashtag-Blöcke) veröffentlichen; die Felder in den Post-Editoren zeigen
+ihn nur noch, ändern kann man ihn nicht mehr.
 
 No API keys? The built-in **offline story writer** takes over — full-length
 first-person stories with zero network.
@@ -222,4 +273,5 @@ api/        ← tts relay (Vercel Serverless Function, Node.js runtime + ws)
 supabase/   ← inert legacy v1 (hosted Edge Functions + Shotstack), unused
 ```
 
-— No server. No ffmpeg. No cloud. No mercy.
+— No server. No render farm. No mercy. (The only ffmpeg in here is the wasm one
+that makes your file a real 60 FPS.)

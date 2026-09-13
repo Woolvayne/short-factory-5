@@ -24,6 +24,13 @@ export interface LocalRenderItem {
   blob?: Blob;
   blobUrl?: string;
   error?: string;
+  /** delivered frame rate of the finished file — always 60 */
+  fps?: number;
+  /** resolution/bitrate were lifted automatically (source below 60 FPS) */
+  fpsBoosted?: boolean;
+  sourceFps?: number | null;
+  /** seconds of Reddit intro card in front of the story */
+  introSeconds?: number;
 }
 
 export interface VoiceTake {
@@ -38,6 +45,8 @@ export interface BgFile {
   width: number;
   height: number;
   duration: number;
+  /** measured source frame rate, null when the browser could not tell */
+  fps: number | null;
   status: "validating" | "ready" | "error";
   reason?: string;
 }

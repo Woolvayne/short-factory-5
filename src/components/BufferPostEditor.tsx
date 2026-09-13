@@ -6,6 +6,7 @@ import {
   Clock,
   Layers,
   Loader2,
+  Lock,
   Rocket,
   Send,
   ShieldCheck,
@@ -14,6 +15,7 @@ import {
 } from "lucide-react";
 import { cn } from "../utils/cn";
 import type { LocalRenderItem } from "../lib/types";
+import { FIXED_HASHTAGS, FIXED_VIDEO_DESCRIPTION } from "../lib/settings";
 import { uploadClipForBuffer } from "../lib/upload";
 import {
   createPosts,
@@ -80,11 +82,8 @@ export default function BufferPostEditor({
     return stored.length ? stored : channels.filter((c) => c.connected).slice(0, 3).map((c) => c.id);
   });
 
-  const [caption, setCaption] = useState(() => {
-    const first = targetItems[0];
-    return first?.idea ? `Storytime: ${first.idea}` : "";
-  });
-  const [hashtags, setHashtags] = useState(() => loadPrefs().defaultHashtags);
+  /* The description is fixed for every video (see settings.ts) — the editor
+     shows it, it does not offer a way to change it. */
   const [ytTitle, setYtTitle] = useState(() => targetItems[0]?.idea?.slice(0, 90) || "Reddit Story");
 
   const now = new Date();
@@ -142,7 +141,7 @@ export default function BufferPostEditor({
     setUploadStatus(null);
 
     try {
-      const tagList = hashtags.split(/[\s,]+/).map((t) => t.trim()).filter(Boolean);
+      const tagList = FIXED_HASHTAGS;
       const bufferMode = MODE_TO_BUFFER[mode];
       const jobs: CreateJob[] = [];
       let slotIdx = 0;
@@ -165,8 +164,9 @@ export default function BufferPostEditor({
       for (const item of sources) {
         for (const channelId of selected) {
           const ch = channels.find((c) => c.id === channelId);
-          const body = caption.trim() || item.idea || "Neues Short";
-          const text = [body, tagList.join(" ")].filter(Boolean).join("\n\n");
+          /* exactly the standard description — identical for every video */
+          const body = FIXED_VIDEO_DESCRIPTION;
+          const text = body;
 
           let dueAt: string | undefined;
           if (mode === "custom") {
@@ -184,8 +184,11 @@ export default function BufferPostEditor({
             channelName: ch?.name,
             service: ch?.service,
             text,
-            title: ch?.service === "youtube" ? ytTitle : body.slice(0, 100),
-            caption: body,
+            title:
+              ch?.service === "youtube"
+                ? ytTitle
+                : item.idea?.trim().slice(0, 100) || "Reddit Story",
+            caption: item.idea?.trim() || "Reddit Story",
             hashtags: tagList,
             mode: bufferMode,
             dueAt,
@@ -386,29 +389,26 @@ export default function BufferPostEditor({
                 )}
               </div>
 
-              {/* caption + hashtags */}
+              {/* fixed description (identical on every video) + YouTube title */}
               <div className="grid gap-3">
                 <div>
-                  <label className="mono-label mb-1 block text-[9px] text-coal-400">CAPTION</label>
+                  <label className="mono-label mb-1 flex items-center gap-1.5 block text-[9px] text-coal-400">
+                    <Lock className="size-3 text-volt-400" /> BESCHREIBUNG · FEST FÜR JEDES VIDEO
+                  </label>
                   <textarea
-                    rows={2}
-                    value={caption}
-                    onChange={(e) => setCaption(e.target.value)}
-                    placeholder="Was soll unter dem Video stehen?"
-                    className="w-full border border-coal-700 bg-coal-850 px-3 py-2 font-mono text-[12px] leading-relaxed text-paper-100 focus:border-volt-400 focus:outline-none"
+                    rows={7}
+                    value={FIXED_VIDEO_DESCRIPTION}
+                    readOnly
+                    disabled
+                    aria-label="Video-Beschreibung, für alle Videos identisch"
+                    className="w-full cursor-not-allowed border border-coal-700 bg-coal-850/60 px-3 py-2 font-mono text-[11.5px] leading-relaxed text-coal-300 focus:outline-none"
                   />
+                  <p className="mt-1 font-mono text-[8.5px] leading-relaxed tracking-wider text-coal-500">
+                    WIRD PRO VIDEO IDENTISCH GESETZT (INKL. HASHTAGS) — INKLUSIVE DER LEERZEILEN.
+                  </p>
                 </div>
                 <div className="grid gap-3 sm:grid-cols-2">
-                  <div>
-                    <label className="mono-label mb-1 block text-[9px] text-coal-400">HASHTAGS</label>
-                    <input
-                      type="text"
-                      value={hashtags}
-                      onChange={(e) => setHashtags(e.target.value)}
-                      className="w-full border border-coal-700 bg-coal-850 px-3 py-2 font-mono text-[12px] text-paper-100 focus:border-volt-400 focus:outline-none"
-                    />
-                  </div>
-                  <div>
+                  <div className="sm:col-span-2">
                     <label className="mono-label mb-1 block text-[9px] text-coal-400">
                       YOUTUBE-TITEL
                     </label>

@@ -25,6 +25,7 @@ import { cn } from "../utils/cn";
 import type { LocalRenderItem, Phase, RenderStage } from "../lib/types";
 import { STAGES, stageIndex } from "../lib/types";
 import { formatBytes, formatClock, formatDuration } from "../lib/media";
+import { TARGET_FPS } from "../lib/settings";
 
 export interface ZipState {
   active: boolean;
@@ -425,6 +426,21 @@ export function OutputPanel({
                         {PROVIDER_BADGE[item.provider] ?? "AI"}
                       </span>
                     )}
+                    {item.status === "done" && (
+                      <span className="border border-volt-400/50 px-1 py-px font-mono text-[7px] tracking-[0.12em] text-volt-300">
+                        {item.fps ?? TARGET_FPS} FPS
+                      </span>
+                    )}
+                    {item.fpsBoosted && (
+                      <span
+                        title={`Quelle mit ${
+                          item.sourceFps != null ? `${item.sourceFps} FPS` : "zu wenig FPS"
+                        } — Auflösung + Bitrate automatisch angehoben`}
+                        className="border border-amber-warn/60 bg-amber-warn/10 px-1 py-px font-mono text-[7px] tracking-[0.12em] text-amber-warn"
+                      >
+                        BOOST
+                      </span>
+                    )}
                   </div>
                   <Icon
                     className={cn(
@@ -473,7 +489,9 @@ export function OutputPanel({
                     <p className="mt-1 truncate font-mono text-[8.5px] tracking-wider text-coal-400">
                       {item.duration ? `${formatDuration(item.duration)} · ` : ""}
                       {item.size ? formatBytes(item.size) : ""} ·{" "}
-                      {item.mime?.includes("webm") ? "WEBM" : "MP4"}
+                      {item.mime?.includes("webm") ? "WEBM" : "MP4"} ·{" "}
+                      {item.fps ?? TARGET_FPS} FPS CFR
+                      {item.introSeconds ? ` · INTRO ${item.introSeconds.toFixed(1)}S` : ""}
                     </p>
                   </div>
                 ) : (

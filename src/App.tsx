@@ -6,6 +6,7 @@ import {
   Clapperboard,
   Cpu,
   FileArchive,
+  Film,
   HardDrive,
   Mic,
   Radio,
@@ -40,13 +41,15 @@ import {
   uid,
 } from "./lib/media";
 import {
+  TARGET_FPS,
   hasAnyLLMKey,
+  introDuration,
   loadSettings,
-  resolveDimensions,
   saveSettings,
   styleInstruction,
   type Settings,
 } from "./lib/settings";
+import { planRenderQuality } from "./lib/quality";
 import { generateIdeas, generateStory } from "./lib/llm";
 import {
   assetToFile,
@@ -181,6 +184,7 @@ export default function App() {
               width: a.meta?.width ?? 0,
               height: a.meta?.height ?? 0,
               duration: a.meta?.duration ?? 0,
+              fps: typeof a.meta?.fps === "number" ? a.meta.fps : null,
               status: "ready" as const,
             }))
           );
@@ -286,7 +290,9 @@ export default function App() {
     async (file: File, origin: "file" | "url", displayName?: string) => {
       const url = URL.createObjectURL(file);
       try {
-        const meta = await probeVideo(file);
+        /* one probe per source — includes a measured frame rate, which decides
+           whether the automatic quality boost has to kick in */
+        const meta = await probeVideo(file, { measureFps: true });
         const src: ClipSource = {
           id: uid(),
           name: displayName ?? file.name,
@@ -298,6 +304,7 @@ export default function App() {
           height: meta.height,
           size: file.size,
           portrait: isPortrait916(meta.width, meta.height),
+          fps: meta.fps,
         };
         setSource((prev) => {
           if (prev?.url) URL.revokeObjectURL(prev.url);
@@ -387,11 +394,12 @@ export default function App() {
           width: 0,
           height: 0,
           duration: 0,
+          fps: null,
           status: "validating",
         };
         setBgs((prev) => (prev.length < 10 ? [...prev, entry] : prev));
         try {
-          const meta = await probeVideo(file);
+          const meta = await probeVideo(file, { measureFps: true });
           if (!isPortrait916(meta.width, meta.height)) {
             patchBg(entry.id, {
               ...meta,
@@ -408,7 +416,12 @@ export default function App() {
             type: file.type || "video/mp4",
             size: file.size,
             blob: file,
-            meta: { width: meta.width, height: meta.height, duration: meta.duration },
+            meta: {
+              width: meta.width,
+              height: meta.height,
+              duration: meta.duration,
+              fps: meta.fps,
+            },
             createdAt: Date.now(),
           });
         } catch (e) {
@@ -603,6 +616,15 @@ export default function App() {
   /*  STEP ② render — explicit, per unit or all                    */
   /* ------------------------------------------------------------ */
 
+  /** the intro card always shows this unit's own title */
+  const seededTitleFor = useCallback(
+    (index: number) =>
+      itemsRef.current.find((i) => i.index === index)?.idea?.trim() ||
+      ideas[index]?.trim() ||
+      "",
+    [ideas]
+  );
+
   const renderIndexes = useCallback(
     async (indexes: number[]) => {
       if (indexes.length === 0 || busy) return;
@@ -612,8 +634,9 @@ export default function App() {
       setPhase("rendering");
 
       const ac = await ensureAudioCtx();
-      const { width, height } = resolveDimensions(settings.quality, settings.aspectRatio);
-      const dealt = mode === "files" ? shuffle([...readyBgs]).map((b) => b.file) : [];
+      /* files mode keeps the whole BgFile so each unit can be planned against
+         the frame rate of the exact clip it ended up on */
+      const dealt = mode === "files" ? shuffle([...readyBgs]) : [];
 
       for (const index of indexes) {
         if (cancelRef.current.cancelled) break;
@@ -623,12 +646,19 @@ export default function App() {
         const clip = clipsRef.current.find((c) => c.index === index);
         const src = sourceRef.current;
         const bgUrl = mode === "single" ? src?.url : undefined;
-        const fileForIndex = mode === "files" ? dealt[index] : undefined;
+        const bgForIndex = mode === "files" ? dealt[index] : undefined;
+        const fileForIndex = bgForIndex?.file;
         let tempUrl: string | null = null;
         if (!bgUrl && fileForIndex) tempUrl = URL.createObjectURL(fileForIndex);
 
         const useUrl = bgUrl ?? tempUrl;
         if (!useUrl) continue;
+
+        /* exactly 60 FPS out, always; when the source carries fewer frames the
+           plan lifts resolution + bitrate automatically (quality.ts) */
+        const sourceFps = mode === "single" ? (src?.fps ?? null) : (bgForIndex?.fps ?? null);
+        const plan = planRenderQuality(settings, sourceFps);
+        const { width, height } = plan;
 
         setActiveIndex(index);
         setActiveProgress(0);
@@ -644,7 +674,10 @@ export default function App() {
             width,
             height,
             audioCtx: ac,
-            settings,
+            settings: plan.settings,
+            introTitle: seededTitleFor(index),
+            sourceFps,
+            qualityBoost: plan.boost,
             signal: cancelRef.current,
             onProgress: setActiveProgress,
           });
@@ -658,6 +691,10 @@ export default function App() {
             size: result.blob.size,
             duration: result.duration,
             clipStart: clip?.start,
+            fps: result.fps,
+            introSeconds: result.introSeconds,
+            fpsBoosted: result.qualityBoost,
+            sourceFps,
           });
         } catch (e) {
           patchItem(index, {
@@ -812,7 +849,19 @@ export default function App() {
               { icon: Cpu, k: "SCRIPT LINES", v: keyed ? "QWEN / MISTRAL · DIRECT" : "OFFLINE WRITER" },
               { icon: Mic, k: "VOICE BENCH", v: "EDGE READ-ALOUD · WEBSOCKET" },
               { icon: Captions, k: "CAPTION JIG", v: "WORD-BOUNDARY TIMINGS" },
-              { icon: Clapperboard, k: "RENDER MILL", v: "CANVAS + MEDIARECORDER" },
+              {
+                icon: Clapperboard,
+                k: "RENDER MILL",
+                v: `CANVAS + MEDIARECORDER · ${TARGET_FPS} FPS CFR`,
+              },
+              {
+                icon: Film,
+                k: "INTRO JIG",
+                v:
+                  introDuration(settings) > 0
+                    ? `REDDIT CARD · ${introDuration(settings).toFixed(1)} S MIT TITEL`
+                    : "DEAKTIVIERT",
+              },
               { icon: FileArchive, k: "DISPATCH", v: "JSZIP → BLOB ANCHOR" },
               {
                 icon: HardDrive,

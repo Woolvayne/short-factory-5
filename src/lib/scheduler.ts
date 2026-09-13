@@ -9,6 +9,8 @@
  *   - Retry failed posts ("Erneut versuchen") & delete posts
  */
 
+import { FIXED_HASHTAGS_STRING } from "./settings";
+
 export type SocialPlatform = "tiktok" | "instagram" | "youtube";
 
 export type PostStatus = "Geplant" | "Wird veröffentlicht" | "Veröffentlicht" | "Fehler";
@@ -47,7 +49,7 @@ export const DEFAULT_ZERNIO_CONFIG: ZernioConfigState = {
   tiktokAccountId: "",
   instagramAccountId: "",
   youtubeAccountId: "",
-  defaultHashtags: "#shorts #viral #redditstories #storytime #fyp",
+  defaultHashtags: FIXED_HASHTAGS_STRING,
   simulateErrorOnNextPost: false,
 };
 

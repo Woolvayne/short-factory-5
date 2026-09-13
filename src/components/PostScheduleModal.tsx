@@ -6,6 +6,7 @@ import {
   Clock,
   Globe,
   Loader2,
+  Lock,
   Rocket,
   Send,
   ShieldCheck,
@@ -13,6 +14,7 @@ import {
   X,
 } from "lucide-react";
 import { cn } from "../utils/cn";
+import { FIXED_HASHTAGS, FIXED_VIDEO_DESCRIPTION } from "../lib/settings";
 import type { LocalRenderItem } from "../lib/types";
 import {
   formatBerlinDateTime,
@@ -65,11 +67,7 @@ export default function PostScheduleModal({
     const first = targetItems[0];
     return first?.idea ? `Storytime: ${first.idea}` : "";
   });
-  const [descOverride, setDescOverride] = useState(() => {
-    const first = targetItems[0];
-    return first?.story ? first.story.slice(0, 240) : "";
-  });
-  const [hashtagsStr, setHashtagsStr] = useState(config.defaultHashtags);
+  /* description + hashtags are fixed for every video (settings.ts) */
   const [mode, setMode] = useState<ScheduleMode>("auto");
   const [postCount, setPostCount] = useState(10);
   const [customTimes, setCustomTimes] = useState("06:00, 20:00");
@@ -134,10 +132,7 @@ export default function PostScheduleModal({
     setErrorMsg(null);
 
     try {
-      const hashtags = hashtagsStr
-        .split(/\s+/)
-        .map((h) => h.trim())
-        .filter(Boolean);
+      const hashtags = FIXED_HASHTAGS;
 
       const itemsPayload = Array.from({ length: postCount }, (_, i) => {
         const src = targetItems[i % Math.max(1, targetItems.length)];
@@ -150,10 +145,7 @@ export default function PostScheduleModal({
               : src?.idea
                 ? `Story #${i + 1}: ${src.idea}`
                 : `Short Video #${i + 1}`,
-          description:
-            targetItems.length === 1 && descOverride.trim()
-              ? descOverride.trim()
-              : src?.story || "Automatisch geplant über ShortsFactory & Zernio API.",
+          description: FIXED_VIDEO_DESCRIPTION,
           hashtags,
         };
       });
@@ -449,27 +441,27 @@ export default function PostScheduleModal({
                 />
               </div>
               <div>
-                <label className="mono-label mb-1 block text-[9px] text-coal-400">
-                  BESCHREIBUNG
+                <label className="mono-label mb-1 flex items-center gap-1.5 block text-[9px] text-coal-400">
+                  <Lock className="size-3 text-volt-400" /> BESCHREIBUNG · FEST FÜR JEDES VIDEO
                 </label>
-                <input
-                  type="text"
-                  value={descOverride}
-                  onChange={(e) => setDescOverride(e.target.value)}
-                  placeholder="Kurze Video-Beschreibung..."
-                  className="w-full border border-coal-700 bg-coal-850 px-3 py-2 font-mono text-[12px] text-paper-100 focus:border-volt-400 focus:outline-none"
+                <textarea
+                  rows={4}
+                  value={FIXED_VIDEO_DESCRIPTION}
+                  readOnly
+                  disabled
+                  className="w-full cursor-not-allowed border border-coal-700 bg-coal-850/60 px-3 py-2 font-mono text-[11px] leading-relaxed text-coal-300 focus:outline-none"
                 />
               </div>
               <div>
                 <label className="mono-label mb-1 block text-[9px] text-coal-400">
-                  STANDARD HASHTAGS
+                  HASHTAGS (TEIL DER FIXEN BESCHREIBUNG)
                 </label>
                 <input
                   type="text"
-                  value={hashtagsStr}
-                  onChange={(e) => setHashtagsStr(e.target.value)}
-                  placeholder="#shorts #viral #storytime"
-                  className="w-full border border-coal-700 bg-coal-850 px-3 py-2 font-mono text-[12px] text-paper-100 focus:border-volt-400 focus:outline-none"
+                  value={FIXED_HASHTAGS.join(" ")}
+                  readOnly
+                  disabled
+                  className="w-full cursor-not-allowed border border-coal-700 bg-coal-850/60 px-3 py-2 font-mono text-[12px] text-coal-300 focus:outline-none"
                 />
               </div>
             </div>

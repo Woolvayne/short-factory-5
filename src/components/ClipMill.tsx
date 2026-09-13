@@ -17,6 +17,8 @@ import {
 import Section from "./Section";
 import { cn } from "../utils/cn";
 import type { BgFile } from "../lib/types";
+import { frameRateNote, isLowFrameRate, sourceFpsLabel } from "../lib/quality";
+import { TARGET_FPS } from "../lib/settings";
 import type { ClipPlan, ClipSource, PlatformInfo } from "../lib/clips";
 import { timecode } from "../lib/clips";
 import { formatBytes, formatDuration } from "../lib/media";
@@ -271,8 +273,18 @@ export default function ClipMill({
                     <p className="font-mono text-[9px] tracking-wider text-coal-400">
                       {source.width}×{source.height} · {formatDuration(source.duration)}
                       {source.size ? ` · ${formatBytes(source.size)}` : ""} ·{" "}
+                      {source.fps != null ? `${sourceFpsLabel(source.fps)} FPS` : "FPS ?"} ·{" "}
                       {source.origin === "url" ? "REMOTE → CACHED LOCALLY" : "LOCAL FILE"}
                       {!source.portrait && " · WILL BE CENTRE-CROPPED TO 9:16"}
+                    </p>
+                    <p
+                      className={cn(
+                        "font-mono text-[8.5px] tracking-wider",
+                        isLowFrameRate(source.fps) ? "text-amber-warn" : "text-mint-400"
+                      )}
+                    >
+                      {frameRateNote(source.fps ?? null, isLowFrameRate(source.fps))} · OUTPUT{" "}
+                      {TARGET_FPS} FPS
                     </p>
                   </div>
                 </div>
@@ -429,8 +441,10 @@ export default function ClipMill({
                             {bg.status === "error"
                               ? bg.reason ?? "REJECTED"
                               : bg.status === "validating"
-                                ? "READING…"
-                                : `${bg.width}×${bg.height} · ${formatDuration(bg.duration)}`}
+                                ? "FPS + METRIC…"
+                                : `${bg.width}×${bg.height} · ${formatDuration(bg.duration)} · ${
+                                    bg.fps != null ? `${sourceFpsLabel(bg.fps)}FPS` : "FPS?"
+                                  }`}
                           </p>
                         </>
                       ) : (

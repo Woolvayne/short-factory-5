@@ -1,8 +1,9 @@
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import {
   Captions,
   Clapperboard,
   Eye,
+  Lock,
   EyeOff,
   Mic,
   RotateCcw,
@@ -16,9 +17,15 @@ import { ColorSwatches, Field, Segmented, Slider, Toggle } from "./Controls";
 import {
   CAPTION_PRESETS,
   DEFAULT_SETTINGS,
+  FIXED_VIDEO_DESCRIPTION,
+  LOW_FPS_CEILING,
+  INTRO_SECONDS_MAX,
+  INTRO_SECONDS_MIN,
   STORY_STYLES,
+  TARGET_FPS,
   VOICES,
   hasAnyLLMKey,
+  introDuration,
   type Bitrate,
   type ClipMode,
   type Quality,
@@ -32,6 +39,7 @@ import {
   type StoryStyle,
 } from "../lib/settings";
 import { cn } from "../utils/cn";
+import { drawRedditIntroCard } from "../lib/intro";
 
 type Tab = "ai" | "voice" | "captions" | "video" | "clips";
 
@@ -88,6 +96,71 @@ function KeyField({
         </button>
       </span>
     </label>
+  );
+}
+
+/**
+ * Loops the Reddit intro card so the look can be checked before anything is
+ * rendered — same drawing routine the renderer uses, same aspect ratio.
+ */
+function IntroPreview({
+  title,
+  subreddit,
+  hook,
+  seconds,
+  aspect,
+}: {
+  title: string;
+  subreddit: string;
+  hook: string;
+  seconds: number;
+  aspect: AspectRatio;
+}) {
+  const ref = useRef<HTMLCanvasElement | null>(null);
+
+  useEffect(() => {
+    const canvas = ref.current;
+    const ctx = canvas?.getContext("2d");
+    if (!canvas || !ctx) return;
+    const W = canvas.width;
+    const H = canvas.height;
+    const dur = Math.max(300, seconds * 1000);
+    const hold = 600; // pause on black before the loop restarts
+    let raf = 0;
+    const start = performance.now();
+    const loop = () => {
+      const cycle = ((performance.now() - start) % (dur + hold)) / dur;
+      ctx.clearRect(0, 0, W, H);
+      ctx.fillStyle = "#08090a";
+      ctx.fillRect(0, 0, W, H);
+      drawRedditIntroCard(ctx, W, H, {
+        title,
+        subreddit,
+        hook,
+        progress: Math.min(1, cycle),
+      });
+      raf = requestAnimationFrame(loop);
+    };
+    raf = requestAnimationFrame(loop);
+    return () => cancelAnimationFrame(raf);
+  }, [title, subreddit, hook, seconds]);
+
+  const box =
+    aspect === "16:9" ? { w: 640, h: 360 } : aspect === "1:1" ? { w: 480, h: 480 } : { w: 405, h: 720 };
+
+  return (
+    <div className="relative overflow-hidden border border-coal-700 bg-black">
+      <canvas
+        ref={ref}
+        width={box.w}
+        height={box.h}
+        className="block h-auto w-full"
+        style={{ aspectRatio: `${box.w} / ${box.h}` }}
+      />
+      <span className="absolute bottom-1 left-2 font-mono text-[8px] tracking-widest text-coal-500">
+        INTRO-LOOP · {seconds.toFixed(1)} S
+      </span>
+    </div>
   );
 }
 
@@ -621,18 +694,27 @@ export default function SettingsPanel({
                 ]}
               />
             </Field>
-            <Field label="FRAME RATE">
-              <Segmented<number>
-                disabled={disabled}
-                value={settings.fps}
-                onChange={(v) => set("fps", v)}
-                options={[
-                  { id: 24, label: "24" },
-                  { id: 30, label: "30" },
-                  { id: 60, label: "60" },
-                ]}
-              />
+            <Field
+              label="FRAME RATE"
+              value={`${TARGET_FPS} FPS`}
+              hint="FIXIERT — JEDER CLIP WIRD MIT 60 FPS AUFGENOMMEN UND ALS ECHTES CONSTANT-FRAME-RATE-MP4 ENCODIERT"
+            >
+              <div className="flex items-center justify-between gap-2 border border-volt-400/50 bg-volt-400/[0.06] px-3 py-2.5">
+                <span className="flex items-center gap-2 font-mono text-[10px] font-bold tracking-widest text-volt-300">
+                  <Lock className="size-3.5" /> {TARGET_FPS} FPS · CFR · NICHT ÄNDERBAR
+                </span>
+                <span className="font-mono text-[8.5px] tracking-wider text-coal-400">
+                  -vsync cfr
+                </span>
+              </div>
             </Field>
+            <Toggle
+              label="AUTO-QUALITÄT BEI WENIGER QUELLEN-FPS"
+              sub={`Quellvideo unter ${LOW_FPS_CEILING} FPS → Auflösung + Bitrate werden automatisch angehoben`}
+              checked={settings.fpsAutoBoost !== false}
+              disabled={disabled}
+              onChange={(v) => set("fpsAutoBoost", v)}
+            />
             <Field label="BITRATE" hint="HIGHER = SHARPER MOTION BUT BIGGER FILES">
               <Segmented<Bitrate>
                 disabled={disabled}
@@ -730,6 +812,93 @@ export default function SettingsPanel({
                 />
               </Field>
             </div>
+          </div>
+
+          {/* ---------- intro card (Reddit-Optik) + fixe Beschreibung ---------- */}
+          <div className="lg:col-span-2 grid gap-3 border-t border-coal-700/70 pt-4">
+            <span className="mono-label text-[9px] text-volt-300">
+              INTRO-KARTE IM REDDIT-LOOK · LÄUFT VOR JEDEM VIDEO
+            </span>
+            <div className="grid gap-3 sm:grid-cols-[1fr_180px]">
+              <div className="grid content-start gap-3">
+                <Toggle
+                  label="INTRO-KARTE"
+                  sub="Vollbild-Karte mit Titel der Story, bevor der Clip einsetzt"
+                  checked={settings.introEnabled}
+                  disabled={disabled}
+                  onChange={(v) => set("introEnabled", v)}
+                />
+                <Field
+                  label="INTRO-DAUER"
+                  value={`${introDuration(settings).toFixed(1)}s`}
+                  hint={`STIMME, UNTERTITEL UND CLIP-FENSTER STARTEN VERSATZT UM ${introDuration(
+                    settings
+                  ).toFixed(1)} S — DER CLIP WIRD ALSO NICHT LÄNGER`}
+                >
+                  <Slider
+                    min={INTRO_SECONDS_MIN}
+                    max={INTRO_SECONDS_MAX}
+                    step={0.1}
+                    value={settings.introSeconds}
+                    disabled={disabled || !settings.introEnabled}
+                    onChange={(v) => set("introSeconds", v)}
+                  />
+                </Field>
+                <div className="grid gap-3 sm:grid-cols-2">
+                  <div>
+                    <label className="mono-label mb-1 block text-[9px] text-coal-400">
+                      SUBREDDIT-ZEILE
+                    </label>
+                    <input
+                      type="text"
+                      value={settings.introSubreddit}
+                      disabled={disabled}
+                      maxLength={32}
+                      onChange={(e) => set("introSubreddit", e.target.value)}
+                      className="w-full border border-coal-700 bg-coal-850 px-3 py-2 font-mono text-[12px] text-paper-100 focus:border-volt-400 focus:outline-none disabled:opacity-50"
+                    />
+                  </div>
+                  <div>
+                    <label className="mono-label mb-1 block text-[9px] text-coal-400">
+                      HOOK-ZEILE AUF DER KARTE
+                    </label>
+                    <input
+                      type="text"
+                      value={settings.introHook}
+                      disabled={disabled}
+                      maxLength={90}
+                      onChange={(e) => set("introHook", e.target.value)}
+                      className="w-full border border-coal-700 bg-coal-850 px-3 py-2 font-mono text-[12px] text-paper-100 focus:border-volt-400 focus:outline-none disabled:opacity-50"
+                    />
+                  </div>
+                </div>
+                <p className="font-mono text-[8.5px] leading-relaxed tracking-wider text-coal-500">
+                  DER TITEL AUF DER KARTE IST DIE IDEE DER JEWEILIGEN EINHEIT (SCHRITT 01) — PRO
+                  VIDEO ALSO UNTERSCHIEDLICH. UP- UND KOMMENTARZAHLEN SIND AUS DEM TITEL ABGELEITET
+                  UND BLEIBEN BEI EINEM RE-RENDER IDENTISCH.
+                </p>
+              </div>
+              <IntroPreview
+                title="My boss took credit for my work — so I deleted his backup"
+                subreddit={settings.introSubreddit}
+                hook={settings.introHook}
+                seconds={Math.max(0.4, introDuration(settings))}
+                aspect={settings.aspectRatio}
+              />
+            </div>
+          </div>
+
+          <div className="lg:col-span-2 grid gap-2 border-t border-coal-700/70 pt-4">
+            <span className="mono-label flex items-center gap-1.5 text-[9px] text-volt-300">
+              <Lock className="size-3" /> VIDEO-BESCHREIBUNG · FEST FÜR JEDES VIDEO
+            </span>
+            <pre className="overflow-x-auto whitespace-pre-wrap border border-coal-700/80 bg-coal-850/60 px-3 py-2.5 font-mono text-[10.5px] leading-relaxed text-coal-200">
+              {FIXED_VIDEO_DESCRIPTION}
+            </pre>
+            <p className="font-mono text-[8.5px] leading-relaxed tracking-wider text-coal-500">
+              WIRD BEIM POSTEN ÜBER BUFFER UND ZERNIO AUTOMATISCH PRO VIDEO GESETZT — LEERLASS IN
+              DEN POST-EDITOREN IST ANGEZEIGT, ABER NICHT VERÄNDERBAR.
+            </p>
           </div>
         </div>
       )}
