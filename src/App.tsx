@@ -634,10 +634,13 @@ export default function App() {
         setActiveProgress(0);
         patchItem(index, { status: "rendering", error: undefined });
 
+        const introTitle = itemsRef.current.find((i) => i.index === index)?.idea || "";
+
         try {
           const result = await renderLocal({
             bgUrl: useUrl,
             clipStart: mode === "single" ? (clip?.start ?? 0) : Math.random() * 3,
+            introTitle,
             voiceMp3: take.audio,
             words: take.words,
             musicFile,

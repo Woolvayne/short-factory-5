@@ -16,6 +16,8 @@ export interface RenderJobOptions {
   bgUrl: string;
   /** where inside the source this clip begins, in seconds */
   clipStart: number;
+  /** story title shown on the opening "fake post" hook card, if any */
+  introTitle?: string;
   voiceMp3: ArrayBuffer;
   words: WordTs[];
   musicFile?: File | null;
@@ -131,6 +133,169 @@ function drawCaption(
   ctx.shadowColor = "transparent";
   ctx.shadowBlur = 0;
   ctx.shadowOffsetY = 0;
+}
+
+/** How long the opening "fake social post" hook card is shown, in seconds. */
+const INTRO_DURATION = 3.2;
+
+/**
+ * Draws the opening hook card: a mocked-up social post (avatar, handle,
+ * timestamp, bold centered title, like/comment/share row) — the classic
+ * "storytime" TikTok/Reels opener that stops the scroll before the real
+ * footage starts.
+ */
+function drawIntroCard(ctx: CanvasRenderingContext2D, title: string, w: number, h: number): void {
+  ctx.fillStyle = "#ffffff";
+  ctx.fillRect(0, 0, w, h);
+
+  const pad = w * 0.075;
+  let y = h * 0.085;
+
+  /* ---- avatar: pink → orange gradient circle */
+  const avatarR = w * 0.052;
+  const avatarCx = pad + avatarR;
+  const avatarCy = y + avatarR;
+  const grad = ctx.createLinearGradient(
+    avatarCx - avatarR,
+    avatarCy - avatarR,
+    avatarCx + avatarR,
+    avatarCy + avatarR
+  );
+  grad.addColorStop(0, "#d6249f");
+  grad.addColorStop(0.5, "#e2496a");
+  grad.addColorStop(1, "#f79c42");
+  ctx.beginPath();
+  ctx.arc(avatarCx, avatarCy, avatarR, 0, Math.PI * 2);
+  ctx.fillStyle = grad;
+  ctx.fill();
+
+  /* ---- handle + timestamp */
+  const textX = avatarCx + avatarR + w * 0.028;
+  ctx.textAlign = "left";
+  ctx.textBaseline = "middle";
+  ctx.fillStyle = "#000000";
+  ctx.font = `700 ${Math.round(w * 0.042)}px Arial, Helvetica, sans-serif`;
+  ctx.fillText("storyteller", textX, avatarCy - avatarR * 0.42);
+  ctx.fillStyle = "#8e8e8e";
+  ctx.font = `400 ${Math.round(w * 0.034)}px Arial, Helvetica, sans-serif`;
+  ctx.fillText("just now", textX, avatarCy + avatarR * 0.48);
+
+  /* ---- title: big, bold, centered in the remaining space */
+  const titleTop = y + avatarR * 2 + h * 0.05;
+  const titleBottom = h * 0.72;
+  const maxW = w - pad * 2;
+  let fs = Math.round(w * 0.135);
+  const clean = (title || "").trim().toUpperCase() || "STORY";
+
+  let lines: string[] = [];
+  for (; fs >= Math.round(w * 0.06); fs -= 4) {
+    ctx.font = `900 ${fs}px "Arial Black", Arial, Helvetica, sans-serif`;
+    const words = clean.split(/\s+/);
+    lines = [];
+    let cur = "";
+    for (const word of words) {
+      const test = cur ? `${cur} ${word}` : word;
+      if (cur && ctx.measureText(test).width > maxW) {
+        lines.push(cur);
+        cur = word;
+      } else {
+        cur = test;
+      }
+    }
+    if (cur) lines.push(cur);
+    const lineH = fs * 1.08;
+    if (lines.length <= 6 && lines.length * lineH <= titleBottom - titleTop) break;
+  }
+
+  ctx.font = `900 ${fs}px "Arial Black", Arial, Helvetica, sans-serif`;
+  ctx.fillStyle = "#000000";
+  ctx.textAlign = "center";
+  const lineH = fs * 1.08;
+  const blockH = (lines.length - 1) * lineH;
+  const centerY = (titleTop + titleBottom) / 2;
+  lines.forEach((ln, i) => {
+    ctx.fillText(ln, w / 2, centerY - blockH / 2 + i * lineH);
+  });
+
+  /* ---- like / comment / share row */
+  const rowY = h * 0.82;
+  ctx.strokeStyle = "#e5e5e5";
+  ctx.lineWidth = Math.max(1, w * 0.0018);
+  ctx.beginPath();
+  ctx.moveTo(pad, rowY - h * 0.035);
+  ctx.lineTo(w - pad, rowY - h * 0.035);
+  ctx.stroke();
+
+  const iconSize = w * 0.062;
+  ctx.lineJoin = "round";
+  ctx.lineCap = "round";
+  ctx.strokeStyle = "#000000";
+  ctx.fillStyle = "#000000";
+  ctx.lineWidth = Math.max(2, w * 0.006);
+
+  /* heart */
+  let ix = pad;
+  const iy = rowY;
+  ctx.save();
+  ctx.translate(ix, iy);
+  const s = iconSize / 24;
+  ctx.beginPath();
+  ctx.moveTo(0, 6 * s);
+  ctx.bezierCurveTo(-2 * s, 2 * s, -8 * s, 2 * s, -8 * s, 8 * s);
+  ctx.bezierCurveTo(-8 * s, 14 * s, -2 * s, 17 * s, 0, 20 * s);
+  ctx.bezierCurveTo(2 * s, 17 * s, 8 * s, 14 * s, 8 * s, 8 * s);
+  ctx.bezierCurveTo(8 * s, 2 * s, 2 * s, 2 * s, 0, 6 * s);
+  ctx.closePath();
+  ctx.stroke();
+  ctx.restore();
+
+  ctx.textAlign = "left";
+  ctx.textBaseline = "middle";
+  ctx.font = `700 ${Math.round(w * 0.038)}px Arial, Helvetica, sans-serif`;
+  ctx.fillText("16,682", ix + iconSize * 1.05, iy + iconSize * 0.42);
+
+  /* comment bubble */
+  ix += iconSize * 3.6;
+  ctx.save();
+  ctx.translate(ix, iy);
+  ctx.beginPath();
+  ctx.ellipse(0, 8 * s, 9 * s, 8 * s, 0, 0, Math.PI * 2);
+  ctx.stroke();
+  ctx.beginPath();
+  ctx.moveTo(-2 * s, 15 * s);
+  ctx.lineTo(-5 * s, 20 * s);
+  ctx.lineTo(1 * s, 15.5 * s);
+  ctx.closePath();
+  ctx.fill();
+  ctx.restore();
+  ctx.fillText("8,802", ix + iconSize * 1.05, iy + iconSize * 0.42);
+
+  /* share (paper plane) */
+  ix += iconSize * 3.6;
+  ctx.save();
+  ctx.translate(ix, iy - iconSize * 0.05);
+  ctx.beginPath();
+  ctx.moveTo(-9 * s, -2 * s);
+  ctx.lineTo(10 * s, 8 * s);
+  ctx.lineTo(-9 * s, 18 * s);
+  ctx.lineTo(-4 * s, 8 * s);
+  ctx.closePath();
+  ctx.stroke();
+  ctx.restore();
+
+  /* bookmark, top-right of the row */
+  const bx = w - pad;
+  ctx.save();
+  ctx.translate(bx, iy - iconSize * 0.15);
+  ctx.beginPath();
+  ctx.moveTo(-7 * s, -2 * s);
+  ctx.lineTo(7 * s, -2 * s);
+  ctx.lineTo(7 * s, 20 * s);
+  ctx.lineTo(0, 13 * s);
+  ctx.lineTo(-7 * s, 20 * s);
+  ctx.closePath();
+  ctx.stroke();
+  ctx.restore();
 }
 
 function drawCover(
@@ -314,8 +479,13 @@ export async function renderLocal(opts: RenderJobOptions): Promise<LocalRenderRe
     const startAt = ac.currentTime + 0.25;
     const endAt = startAt + duration;
 
+    const introDuration = Math.min(INTRO_DURATION, duration * 0.3);
     const drawFrame = () => {
       const t = Math.max(0, ac.currentTime - startAt);
+      if (t < introDuration) {
+        drawIntroCard(ctx, opts.introTitle || "", w, h);
+        return;
+      }
       const zoom = s.zoomEffect ? 1 + 0.06 * Math.min(1, t / Math.max(1, duration)) : 1;
       if (video.readyState >= 2) drawCover(ctx, video, w, h, zoom, s.vignette);
       else {
