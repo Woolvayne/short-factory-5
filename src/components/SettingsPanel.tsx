@@ -622,16 +622,9 @@ export default function SettingsPanel({
               />
             </Field>
             <Field label="FRAME RATE">
-              <Segmented<number>
-                disabled={disabled}
-                value={settings.fps}
-                onChange={(v) => set("fps", v)}
-                options={[
-                  { id: 24, label: "24" },
-                  { id: 30, label: "30" },
-                  { id: 60, label: "60" },
-                ]}
-              />
+              <div className="border border-white/10 bg-white/5 px-3 py-2 font-mono text-[11px] text-white/60">
+                60 FPS · fest eingestellt für TikTok/Instagram-Kompatibilität
+              </div>
             </Field>
             <Field label="BITRATE" hint="HIGHER = SHARPER MOTION BUT BIGGER FILES">
               <Segmented<Bitrate>

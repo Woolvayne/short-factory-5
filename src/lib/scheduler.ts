@@ -47,7 +47,7 @@ export const DEFAULT_ZERNIO_CONFIG: ZernioConfigState = {
   tiktokAccountId: "",
   instagramAccountId: "",
   youtubeAccountId: "",
-  defaultHashtags: "#shorts #viral #redditstories #storytime #fyp",
+  defaultHashtags: "#reddit #redditstories #storytime #stories #fyp",
   simulateErrorOnNextPost: false,
 };
 

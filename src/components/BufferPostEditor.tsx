@@ -80,10 +80,7 @@ export default function BufferPostEditor({
     return stored.length ? stored : channels.filter((c) => c.connected).slice(0, 3).map((c) => c.id);
   });
 
-  const [caption, setCaption] = useState(() => {
-    const first = targetItems[0];
-    return first?.idea ? `Storytime: ${first.idea}` : "";
-  });
+  const [caption, setCaption] = useState(() => loadPrefs().defaultCaption);
   const [hashtags, setHashtags] = useState(() => loadPrefs().defaultHashtags);
   const [ytTitle, setYtTitle] = useState(() => targetItems[0]?.idea?.slice(0, 90) || "Reddit Story");
 

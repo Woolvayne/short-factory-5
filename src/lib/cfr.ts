@@ -1,8 +1,7 @@
 /**
- * Forces a genuinely constant frame rate on a rendered clip using
- * ffmpeg.wasm (`-vsync cfr`) — the same industry-standard technique nearly
- * every professional video pipeline uses before handing footage to a
- * platform like TikTok/Instagram/YouTube.
+ * Forces a genuinely constant 60 fps on a rendered clip using ffmpeg.wasm's
+ * `minterpolate` filter — the same class of technique professional video
+ * pipelines use before handing footage to a platform like TikTok/Instagram.
  *
  * Why this exists: browsers timestamp MediaRecorder/WebCodecs output based
  * on real capture time. Under any real-world irregularity — a slow device,
@@ -10,10 +9,13 @@
  * garbage-collection pauses — those timestamps end up unevenly spaced,
  * producing a *variable* frame rate file even when the nominal fps setting
  * looks correct. TikTok's ingestion validates for a truly constant rate and
- * rejects anything else. Rather than trying to make the capture itself
- * perfectly even (which real-time browser APIs fundamentally cannot
- * guarantee), this step re-encodes the finished file with explicit,
- * evenly-spaced frame timestamps — the same fix used industry-wide.
+ * rejects anything else.
+ *
+ * Using `minterpolate` instead of a plain `-r 60` also means clips whose
+ * source content is effectively lower-motion-resolution (e.g. captured from
+ * 24/30fps background footage) get real frame-blended interpolation up to
+ * 60fps rather than naive frame duplication — smoother output, not just a
+ * technically-correct frame count.
  *
  * Uses the single-threaded ffmpeg-core build, which needs no
  * cross-origin-isolation (COOP/COEP) headers — this app has none, and the
@@ -60,27 +62,54 @@ export async function forceConstantFrameRate(
 
   try {
     await ffmpeg.writeFile(inName, await fetchFile(input));
-    await ffmpeg.exec([
-      "-i",
-      inName,
-      "-r",
-      String(fps),
-      "-vsync",
-      "cfr",
-      "-c:v",
-      "libx264",
-      "-profile:v",
-      "main",
-      "-pix_fmt",
-      "yuv420p",
-      "-c:a",
-      "aac",
-      "-b:a",
-      "128k",
-      "-movflags",
-      "+faststart",
-      outName,
-    ]);
+    try {
+      await ffmpeg.exec([
+        "-i",
+        inName,
+        "-vf",
+        `minterpolate=fps=${fps}:mi_mode=blend`,
+        "-c:v",
+        "libx264",
+        "-profile:v",
+        "main",
+        "-pix_fmt",
+        "yuv420p",
+        "-c:a",
+        "aac",
+        "-b:a",
+        "128k",
+        "-movflags",
+        "+faststart",
+        outName,
+      ]);
+    } catch (e) {
+      /* minterpolate can be too slow/memory-hungry for very long clips on
+         weaker devices — fall back to a plain, guaranteed-CFR duplicate-
+         frame re-encode rather than losing the render entirely. Still
+         hits exactly `fps`, just without motion-blended smoothing. */
+      console.warn("minterpolate failed, falling back to plain CFR re-encode:", e);
+      await ffmpeg.exec([
+        "-i",
+        inName,
+        "-r",
+        String(fps),
+        "-vsync",
+        "cfr",
+        "-c:v",
+        "libx264",
+        "-profile:v",
+        "main",
+        "-pix_fmt",
+        "yuv420p",
+        "-c:a",
+        "aac",
+        "-b:a",
+        "128k",
+        "-movflags",
+        "+faststart",
+        outName,
+      ]);
+    }
     const data = await ffmpeg.readFile(outName);
     const bytes =
       data instanceof Uint8Array ? new Uint8Array(data) : new TextEncoder().encode(String(data));

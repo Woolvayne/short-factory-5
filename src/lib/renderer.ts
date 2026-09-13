@@ -273,7 +273,10 @@ export async function renderLocal(opts: RenderJobOptions): Promise<LocalRenderRe
     }
 
     /* ---- recorder */
-    const fps = Math.max(24, Math.min(60, s.fps));
+    /* Fest auf 60 verdrahtet — nicht aus s.fps gelesen, damit auch bereits im
+       Browser gespeicherte, ältere Settings (z.B. fps: 30 aus einem alten
+       localStorage-Stand) niemals eine andere Framerate erzwingen können. */
+    const fps = 60;
     const canvasStream = canvas.captureStream(fps);
     const mixed = new MediaStream([
       ...canvasStream.getVideoTracks(),

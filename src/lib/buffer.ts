@@ -71,6 +71,8 @@ const PREFS_KEY = "shortsfactory.buffer_prefs.v1";
 export interface BufferPrefs {
   /** channel ids selected by default in the post editor */
   selectedChannelIds: string[];
+  /** fixed engagement caption used for every post unless the user overrides it */
+  defaultCaption: string;
   defaultHashtags: string;
   /** automatic planner */
   postsPerDay: number;
@@ -81,7 +83,9 @@ export interface BufferPrefs {
 
 export const DEFAULT_PREFS: BufferPrefs = {
   selectedChannelIds: [],
-  defaultHashtags: "#shorts #viral #redditstories #storytime #fyp",
+  defaultCaption:
+    "You won't believe how this story ends...\nStay until the end because the plot twist is INSANE.\nWould you have done the same?",
+  defaultHashtags: "#reddit #redditstories #storytime #stories #fyp",
   postsPerDay: 2,
   preferredTimes: ["06:00", "20:00"],
   planDays: 5,
