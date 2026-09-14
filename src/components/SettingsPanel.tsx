@@ -626,6 +626,20 @@ export default function SettingsPanel({
                 60 FPS · fest eingestellt für TikTok/Instagram-Kompatibilität
               </div>
             </Field>
+            <Field
+              label="INTRO-KARTE"
+              value={`${(settings.introDurationSec ?? 1).toFixed(1)}s`}
+              hint="DAUER DER FAKE-POST-EINBLENDUNG AM VIDEOANFANG"
+            >
+              <Slider
+                min={0}
+                max={4}
+                step={0.5}
+                value={settings.introDurationSec ?? 1}
+                disabled={disabled}
+                onChange={(v) => set("introDurationSec", v)}
+              />
+            </Field>
             <Field label="BITRATE" hint="HIGHER = SHARPER MOTION BUT BIGGER FILES">
               <Segmented<Bitrate>
                 disabled={disabled}

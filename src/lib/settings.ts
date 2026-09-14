@@ -52,6 +52,8 @@ export interface Settings {
   bitrate: Bitrate;
   vignette: boolean;
   zoomEffect: boolean;
+  /** how long the opening "fake social post" hook card is shown, in seconds */
+  introDurationSec: number;
   tailPadding: number; // seconds of silence after the voice
 
   /* ---- video extras (opt-in) ---- */
@@ -117,6 +119,7 @@ export const DEFAULT_SETTINGS: Settings = {
   bitrate: "med",
   vignette: true,
   zoomEffect: false,
+  introDurationSec: 1,
   tailPadding: 0.6,
 
   aspectRatio: "9:16",

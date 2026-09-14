@@ -135,26 +135,98 @@ function drawCaption(
   ctx.shadowOffsetY = 0;
 }
 
-/** How long the opening "fake social post" hook card is shown, in seconds. */
-const INTRO_DURATION = 3.2;
+/** Default duration the opening "fake social post" hook card is shown, in seconds. */
+const DEFAULT_INTRO_DURATION = 1;
+
+function roundRectPath(
+  ctx: CanvasRenderingContext2D,
+  x: number,
+  y: number,
+  w: number,
+  h: number,
+  r: number
+): void {
+  ctx.beginPath();
+  ctx.moveTo(x + r, y);
+  ctx.lineTo(x + w - r, y);
+  ctx.arcTo(x + w, y, x + w, y + r, r);
+  ctx.lineTo(x + w, y + h - r);
+  ctx.arcTo(x + w, y + h, x + w - r, y + h, r);
+  ctx.lineTo(x + r, y + h);
+  ctx.arcTo(x, y + h, x, y + h - r, r);
+  ctx.lineTo(x, y + r);
+  ctx.arcTo(x, y, x + r, y, r);
+  ctx.closePath();
+}
 
 /**
  * Draws the opening hook card: a mocked-up social post (avatar, handle,
- * timestamp, bold centered title, like/comment/share row) — the classic
- * "storytime" TikTok/Reels opener that stops the scroll before the real
- * footage starts.
+ * timestamp, bold title, like/comment/share row) floating as a white
+ * rounded card *on top of* the already-playing background footage — the
+ * classic "storytime" TikTok/Reels opener that stops the scroll before
+ * the viewer even registers the video has started.
  */
-function drawIntroCard(ctx: CanvasRenderingContext2D, title: string, w: number, h: number): void {
-  ctx.fillStyle = "#ffffff";
-  ctx.fillRect(0, 0, w, h);
+function drawIntroOverlay(ctx: CanvasRenderingContext2D, title: string, w: number, h: number): void {
+  const marginX = w * 0.065;
+  const cardW = w - marginX * 2;
+  const pad = cardW * 0.06;
+  const avatarR = cardW * 0.052;
 
-  const pad = w * 0.075;
-  let y = h * 0.085;
+  /* ---- wrap the title first so we know how tall the card needs to be */
+  const titleFs = Math.round(cardW * 0.072);
+  ctx.font = `800 ${titleFs}px Arial, Helvetica, sans-serif`;
+  const maxTextW = cardW - pad * 2;
+  const clean = (title || "").trim() || "Storytime";
+  const words = clean.split(/\s+/);
+  const lines: string[] = [];
+  let cur = "";
+  for (const word of words) {
+    const test = cur ? `${cur} ${word}` : word;
+    if (cur && ctx.measureText(test).width > maxTextW) {
+      lines.push(cur);
+      cur = word;
+    } else {
+      cur = test;
+    }
+  }
+  if (cur) lines.push(cur);
+  const cappedLines = lines.slice(0, 3);
+  if (lines.length > 3) {
+    let last = cappedLines[2];
+    while (last.length > 3 && ctx.measureText(last + "…").width > maxTextW) {
+      last = last.slice(0, -1);
+    }
+    cappedLines[2] = last.replace(/\s+$/, "") + "…";
+  }
+  const titleLineH = titleFs * 1.3;
+
+  const headerH = avatarR * 2;
+  const gapAfterHeader = cardW * 0.05;
+  const titleBlockH = cappedLines.length * titleLineH;
+  const gapAfterTitle = cardW * 0.04;
+  const dividerGap = cardW * 0.035;
+  const iconRowH = cardW * 0.07;
+
+  const cardH = pad + headerH + gapAfterHeader + titleBlockH + gapAfterTitle + dividerGap + iconRowH + pad;
+  const cardX = marginX;
+  const cardY = h * 0.5 - cardH / 2;
+
+  /* ---- card background: white rounded rect with a soft drop shadow */
+  ctx.save();
+  ctx.shadowColor = "rgba(0,0,0,0.28)";
+  ctx.shadowBlur = cardW * 0.035;
+  ctx.shadowOffsetY = cardW * 0.014;
+  roundRectPath(ctx, cardX, cardY, cardW, cardH, cardW * 0.045);
+  ctx.fillStyle = "#ffffff";
+  ctx.fill();
+  ctx.restore();
+
+  const cx = cardX + pad;
+  let cy = cardY + pad;
 
   /* ---- avatar: pink → orange gradient circle */
-  const avatarR = w * 0.052;
-  const avatarCx = pad + avatarR;
-  const avatarCy = y + avatarR;
+  const avatarCx = cx + avatarR;
+  const avatarCy = cy + avatarR;
   const grad = ctx.createLinearGradient(
     avatarCx - avatarR,
     avatarCy - avatarR,
@@ -170,75 +242,51 @@ function drawIntroCard(ctx: CanvasRenderingContext2D, title: string, w: number, 
   ctx.fill();
 
   /* ---- handle + timestamp */
-  const textX = avatarCx + avatarR + w * 0.028;
+  const textX = avatarCx + avatarR + cardW * 0.03;
   ctx.textAlign = "left";
   ctx.textBaseline = "middle";
   ctx.fillStyle = "#000000";
-  ctx.font = `700 ${Math.round(w * 0.042)}px Arial, Helvetica, sans-serif`;
+  ctx.font = `700 ${Math.round(cardW * 0.046)}px Arial, Helvetica, sans-serif`;
   ctx.fillText("storyteller", textX, avatarCy - avatarR * 0.42);
   ctx.fillStyle = "#8e8e8e";
-  ctx.font = `400 ${Math.round(w * 0.034)}px Arial, Helvetica, sans-serif`;
-  ctx.fillText("just now", textX, avatarCy + avatarR * 0.48);
+  ctx.font = `400 ${Math.round(cardW * 0.036)}px Arial, Helvetica, sans-serif`;
+  ctx.fillText("just now", textX, avatarCy + avatarR * 0.5);
 
-  /* ---- title: big, bold, centered in the remaining space */
-  const titleTop = y + avatarR * 2 + h * 0.05;
-  const titleBottom = h * 0.72;
-  const maxW = w - pad * 2;
-  let fs = Math.round(w * 0.135);
-  const clean = (title || "").trim().toUpperCase() || "STORY";
+  cy += headerH + gapAfterHeader;
 
-  let lines: string[] = [];
-  for (; fs >= Math.round(w * 0.06); fs -= 4) {
-    ctx.font = `900 ${fs}px "Arial Black", Arial, Helvetica, sans-serif`;
-    const words = clean.split(/\s+/);
-    lines = [];
-    let cur = "";
-    for (const word of words) {
-      const test = cur ? `${cur} ${word}` : word;
-      if (cur && ctx.measureText(test).width > maxW) {
-        lines.push(cur);
-        cur = word;
-      } else {
-        cur = test;
-      }
-    }
-    if (cur) lines.push(cur);
-    const lineH = fs * 1.08;
-    if (lines.length <= 6 && lines.length * lineH <= titleBottom - titleTop) break;
-  }
-
-  ctx.font = `900 ${fs}px "Arial Black", Arial, Helvetica, sans-serif`;
+  /* ---- title: bold, left-aligned, up to 3 lines */
+  ctx.textAlign = "left";
+  ctx.textBaseline = "middle";
   ctx.fillStyle = "#000000";
-  ctx.textAlign = "center";
-  const lineH = fs * 1.08;
-  const blockH = (lines.length - 1) * lineH;
-  const centerY = (titleTop + titleBottom) / 2;
-  lines.forEach((ln, i) => {
-    ctx.fillText(ln, w / 2, centerY - blockH / 2 + i * lineH);
+  ctx.font = `800 ${titleFs}px Arial, Helvetica, sans-serif`;
+  cappedLines.forEach((ln, i) => {
+    ctx.fillText(ln, cx, cy + titleLineH * i + titleLineH / 2);
   });
+  cy += titleBlockH + gapAfterTitle;
+
+  /* ---- divider */
+  ctx.strokeStyle = "#ececec";
+  ctx.lineWidth = Math.max(1, cardW * 0.0025);
+  ctx.beginPath();
+  ctx.moveTo(cx, cy);
+  ctx.lineTo(cardX + cardW - pad, cy);
+  ctx.stroke();
+  cy += dividerGap;
 
   /* ---- like / comment / share row */
-  const rowY = h * 0.82;
-  ctx.strokeStyle = "#e5e5e5";
-  ctx.lineWidth = Math.max(1, w * 0.0018);
-  ctx.beginPath();
-  ctx.moveTo(pad, rowY - h * 0.035);
-  ctx.lineTo(w - pad, rowY - h * 0.035);
-  ctx.stroke();
-
-  const iconSize = w * 0.062;
+  const iconSize = cardW * 0.062;
   ctx.lineJoin = "round";
   ctx.lineCap = "round";
   ctx.strokeStyle = "#000000";
   ctx.fillStyle = "#000000";
-  ctx.lineWidth = Math.max(2, w * 0.006);
+  ctx.lineWidth = Math.max(1.5, cardW * 0.006);
+  const s = iconSize / 24;
+  const iy = cy + iconRowH / 2;
 
   /* heart */
-  let ix = pad;
-  const iy = rowY;
+  let ix = cx;
   ctx.save();
   ctx.translate(ix, iy);
-  const s = iconSize / 24;
   ctx.beginPath();
   ctx.moveTo(0, 6 * s);
   ctx.bezierCurveTo(-2 * s, 2 * s, -8 * s, 2 * s, -8 * s, 8 * s);
@@ -251,11 +299,11 @@ function drawIntroCard(ctx: CanvasRenderingContext2D, title: string, w: number, 
 
   ctx.textAlign = "left";
   ctx.textBaseline = "middle";
-  ctx.font = `700 ${Math.round(w * 0.038)}px Arial, Helvetica, sans-serif`;
-  ctx.fillText("16,682", ix + iconSize * 1.05, iy + iconSize * 0.42);
+  ctx.font = `700 ${Math.round(cardW * 0.038)}px Arial, Helvetica, sans-serif`;
+  ctx.fillText("17,719", ix + iconSize * 1.05, iy + iconSize * 0.42);
 
   /* comment bubble */
-  ix += iconSize * 3.6;
+  ix += iconSize * 3.7;
   ctx.save();
   ctx.translate(ix, iy);
   ctx.beginPath();
@@ -268,10 +316,10 @@ function drawIntroCard(ctx: CanvasRenderingContext2D, title: string, w: number, 
   ctx.closePath();
   ctx.fill();
   ctx.restore();
-  ctx.fillText("8,802", ix + iconSize * 1.05, iy + iconSize * 0.42);
+  ctx.fillText("9,154", ix + iconSize * 1.05, iy + iconSize * 0.42);
 
   /* share (paper plane) */
-  ix += iconSize * 3.6;
+  ix += iconSize * 3.7;
   ctx.save();
   ctx.translate(ix, iy - iconSize * 0.05);
   ctx.beginPath();
@@ -284,7 +332,7 @@ function drawIntroCard(ctx: CanvasRenderingContext2D, title: string, w: number, 
   ctx.restore();
 
   /* bookmark, top-right of the row */
-  const bx = w - pad;
+  const bx = cardX + cardW - pad;
   ctx.save();
   ctx.translate(bx, iy - iconSize * 0.15);
   ctx.beginPath();
@@ -479,18 +527,21 @@ export async function renderLocal(opts: RenderJobOptions): Promise<LocalRenderRe
     const startAt = ac.currentTime + 0.25;
     const endAt = startAt + duration;
 
-    const introDuration = Math.min(INTRO_DURATION, duration * 0.3);
+    const introDuration = Math.min(
+      Math.max(0, s.introDurationSec ?? DEFAULT_INTRO_DURATION),
+      duration * 0.4
+    );
     const drawFrame = () => {
       const t = Math.max(0, ac.currentTime - startAt);
-      if (t < introDuration) {
-        drawIntroCard(ctx, opts.introTitle || "", w, h);
-        return;
-      }
       const zoom = s.zoomEffect ? 1 + 0.06 * Math.min(1, t / Math.max(1, duration)) : 1;
       if (video.readyState >= 2) drawCover(ctx, video, w, h, zoom, s.vignette);
       else {
         ctx.fillStyle = "#000";
         ctx.fillRect(0, 0, w, h);
+      }
+      if (t < introDuration) {
+        drawIntroOverlay(ctx, opts.introTitle || "", w, h);
+        return;
       }
       if (s.captionsOn) {
         const cue = cueAt(cues, t);
