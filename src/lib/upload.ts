@@ -56,13 +56,24 @@ async function signUpload(contentType: string, sizeBytes: number): Promise<{
 
 async function uploadViaSignedPut(blob: Blob, contentType: string): Promise<string> {
   const { uploadUrl, headers, mediaId } = await signUpload(contentType, blob.size);
+  // Signierte URLs verlangen EXAKT die vorgegebenen Header — Content-Type nur
+  // ergänzen, wenn er (case-insensitiv) nicht bereits vorhanden ist, sonst
+  // kann der Header-Mix die Signatur brechen (HTTP 403/InvalidHeaders).
+  const putHeaders: Record<string, string> = { ...(headers || {}) };
+  if (!Object.keys(putHeaders).some((k) => k.toLowerCase() === "content-type")) {
+    putHeaders["Content-Type"] = contentType;
+  }
   const put = await fetch(uploadUrl, {
     method: "PUT",
-    headers: { "Content-Type": contentType, ...headers },
+    headers: putHeaders,
     body: blob,
   });
   if (!put.ok) {
-    throw new Error(`Upload zu Postlake fehlgeschlagen (HTTP ${put.status}).`);
+    // Fehler-Body (gekürzt) mitschleifen — signierte Endpunkte erklären dort den Grund.
+    const errText = (await put.text().catch(() => "")).slice(0, 160);
+    throw new Error(
+      `Upload zu Postlake fehlgeschlagen (HTTP ${put.status})${errText ? `: ${errText}` : "."}`
+    );
   }
   return mediaId;
 }
@@ -70,11 +81,16 @@ async function uploadViaSignedPut(blob: Blob, contentType: string): Promise<stri
 async function uploadViaSupabaseThenIngest(
   blob: Blob,
   cacheKey: string,
-  contentType: string
+  contentType: string,
+  primaryError?: unknown
 ): Promise<string> {
+  const primaryHint = () => {
+    const m = primaryError instanceof Error ? primaryError.message : String(primaryError || "");
+    return m ? ` (Primärweg zuvor: ${m.slice(0, 160)})` : "";
+  };
   if (!supabase) {
     throw new Error(
-      "Weder Postlake-Signierung noch Supabase verfügbar: POSTLAKE_API_KEY auf dem Server setzen (empfohlen) oder VITE_SUPABASE_URL / VITE_SUPABASE_ANON_KEY konfigurieren."
+      `Weder Postlake-Signierung noch Supabase verfügbar${primaryHint()}: POSTLAKE_API_KEY auf dem Server setzen (empfohlen) oder VITE_SUPABASE_URL / VITE_SUPABASE_ANON_KEY konfigurieren.`
     );
   }
   const path = `${cacheKey}-${Date.now()}.${extFor(contentType)}`;
@@ -82,7 +98,7 @@ async function uploadViaSupabaseThenIngest(
     contentType,
     upsert: true,
   });
-  if (error) throw error;
+  if (error) throw new Error(`${error.message || "Supabase-Upload fehlgeschlagen."}${primaryHint()}`);
   const { data } = supabase.storage.from("renders").getPublicUrl(path);
 
   const res = await fetch("/api/postlake", {
@@ -92,7 +108,9 @@ async function uploadViaSupabaseThenIngest(
   });
   const out = await res.json();
   if (!out?.ok || !out.mediaId) {
-    throw new Error(out?.error || "Medien-Übergabe an Postlake fehlgeschlagen.");
+    throw new Error(
+      `${out?.error || "Medien-Übergabe an Postlake fehlgeschlagen."}${primaryHint()}`
+    );
   }
   return out.mediaId as string;
 }
@@ -116,7 +134,8 @@ export async function uploadClipForPostlake(
       return await uploadViaSignedPut(blob, contentType);
     } catch (signErr) {
       console.warn("Postlake-Signierung nicht möglich, nutze Supabase-Fallback:", signErr);
-      return await uploadViaSupabaseThenIngest(blob, cacheKey, contentType);
+      // Primärfehler einketten, damit die Fallback-Fehlermeldung beide Diagnosen zeigt
+      return await uploadViaSupabaseThenIngest(blob, cacheKey, contentType, signErr);
     }
   })().catch((e) => {
     uploadCache.delete(cacheKey); // Retry erlauben

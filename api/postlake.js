@@ -54,17 +54,30 @@ async function lakeFetch(apiKey, path, { method = "GET", body, headers = {}, tim
   const ctrl = new AbortController();
   const timer = setTimeout(() => ctrl.abort(), timeoutMs);
   try {
+    // Binär-Bodies ROH durchlassen — kein JSON.stringify (bläht Bytes ~3× auf → HTTP 413
+    // am Gateway), kein automatischer JSON-Content-Type. Header-Lookups case-insensitiv.
+    const isBinary =
+      (typeof Buffer !== "undefined" && Buffer.isBuffer(body)) ||
+      body instanceof Uint8Array ||
+      (typeof ArrayBuffer !== "undefined" && body instanceof ArrayBuffer) ||
+      (typeof Blob !== "undefined" && body instanceof Blob);
+    const hasContentType = Object.keys(headers).some((k) => k.toLowerCase() === "content-type");
     const res = await fetch(`${POSTLAKE_BASE_URL}${path}`, {
       method,
       signal: ctrl.signal,
       headers: {
         Authorization: `Bearer ${apiKey}`,
-        ...(body !== undefined && !(body instanceof FormData) && !headers["Content-Type"]
+        ...(body !== undefined && !isBinary && !(body instanceof FormData) && !hasContentType
           ? { "Content-Type": "application/json" }
           : {}),
         ...headers,
       },
-      body: body === undefined ? undefined : typeof body === "string" || body instanceof FormData ? body : JSON.stringify(body),
+      body:
+        body === undefined
+          ? undefined
+          : typeof body === "string" || isBinary || body instanceof FormData
+            ? body
+            : JSON.stringify(body),
     });
     const data = await res.json().catch(() => ({}));
     return { res, data };
@@ -111,6 +124,141 @@ function normAccount(a) {
     status: String(a.status || (a.connected === false ? "disconnected" : "connected")),
     connectVariant: a.connectVariant || "",
   };
+}
+
+/* ------------------------------------------------------------------ */
+/*  Upload-Ziele aus /media/batch-Antworten defensiv parsen             */
+/* ------------------------------------------------------------------ */
+
+const UPLOAD_URL_KEYS = [
+  "uploadUrl", "uploadURL", "upload_url",
+  "putUrl", "putURL", "put_url",
+  "signedUrl", "signed_url",
+  "targetUrl", "target_url",
+  "url",
+];
+const MEDIA_ID_KEYS = [
+  "id", "mediaId", "media_id", "medId", "med_id", "assetId", "asset_id", "media",
+];
+const UPLOAD_HEADER_KEYS = ["headers", "uploadHeaders", "upload_headers", "putHeaders", "put_headers"];
+const UPLOAD_NEST_KEYS = ["upload", "target", "put", "signedUpload", "uploadTarget"];
+
+/** Ersten nicht-leeren String-Wert aus einer Key-Liste holen. */
+function pickStringField(obj, keys) {
+  if (!obj || typeof obj !== "object") return null;
+  const lower = Object.fromEntries(Object.keys(obj).map((k) => [k.toLowerCase(), k]));
+  for (const key of keys) {
+    const actual = lower[key.toLowerCase()];
+    if (actual === undefined) continue;
+    const v = obj[actual];
+    if (typeof v === "string" && v.trim()) return v;
+  }
+  return null;
+}
+
+/** Header-Objekte mergen (spätere Quellen gewinnen, nur String-Werte). */
+function pickHeaderFields(obj) {
+  const out = {};
+  if (!obj || typeof obj !== "object") return out;
+  const lower = Object.fromEntries(Object.keys(obj).map((k) => [k.toLowerCase(), k]));
+  for (const key of UPLOAD_HEADER_KEYS) {
+    const actual = lower[key.toLowerCase()];
+    const h = actual !== undefined ? obj[actual] : undefined;
+    if (!h || typeof h !== "object" || Array.isArray(h)) continue;
+    for (const [hk, hv] of Object.entries(h)) {
+      if (typeof hv === "string" && hv) out[hk] = hv;
+    }
+  }
+  return out;
+}
+
+/**
+ * Parst ein Item aus einer /media/batch-Antwort (oder die Antwort selbst) und
+ * extrahiert { uploadUrl, headers, mediaId, expiresIn }. Toleriert verschachtelte
+ * upload-/target-/put-Objekte sowie camelCase/snake_case-Varianten. Bevorzugt
+ * med_…-IDs gegenüber anderen ID-Feldern.
+ */
+function pickUploadTarget(item) {
+  const visit = (node, keySource = "") => {
+    if (Array.isArray(node)) {
+      for (const el of node) {
+        const hit = visit(el, keySource);
+        if (hit) return hit;
+      }
+      return null;
+    }
+    if (!node || typeof node !== "object") return null;
+    const url = pickStringField(node, UPLOAD_URL_KEYS);
+    const mediaId = pickStringField(node, MEDIA_ID_KEYS);
+    if (url || mediaId) return { node, url, mediaId, keySource };
+    for (const k of UPLOAD_NEST_KEYS) {
+      const actual =
+        node[k] !== undefined ? k : Object.keys(node).find((x) => x.toLowerCase() === k.toLowerCase());
+      if (actual === undefined) continue;
+      const hit = visit(node[actual], k);
+      if (hit) return hit;
+    }
+    return null;
+  };
+
+  const primary = visit(item);
+  if (!primary) return null;
+
+  // med_…-ID bevorzugen: trägt der Primärtreffer eine andere Form, Geschwister prüfen.
+  let best = primary;
+  if (primary.mediaId && !/^med_/i.test(primary.mediaId)) {
+    const candidates = [];
+    const collect = (n) => {
+      if (Array.isArray(n)) return n.forEach(collect);
+      if (!n || typeof n !== "object") return;
+      const id = pickStringField(n, MEDIA_ID_KEYS);
+      if (id) candidates.push({ node: n, id });
+      for (const k of UPLOAD_NEST_KEYS) {
+        const actual =
+          n[k] !== undefined ? k : Object.keys(n).find((x) => x.toLowerCase() === k.toLowerCase());
+        if (actual !== undefined) collect(n[actual]);
+      }
+    };
+    collect(item);
+    const med = candidates.find((c) => /^med_/i.test(c.id));
+    if (med) {
+      const url = primary.url || pickStringField(med.node, UPLOAD_URL_KEYS);
+      best = { node: med.node, url, mediaId: med.id, keySource: primary.keySource };
+    }
+  }
+
+  const headers = { ...pickHeaderFields(item), ...pickHeaderFields(best.node) };
+  const expiresIn =
+    Number(best.node.expiresIn ?? best.node.expires_in ?? item?.expiresIn ?? item?.expires_in) || 300;
+  return { uploadUrl: best.url || null, mediaId: best.mediaId || null, headers, expiresIn };
+}
+
+/** Kandidaten-Items einer /media/batch-Antwort (Erfolg steht meist vorn). */
+function uploadTargetCandidates(data) {
+  const out = [];
+  for (const item of pickList(data)) out.push(item);
+  if (data && typeof data === "object" && !Array.isArray(data)) {
+    for (const k of ["media", "upload", "target", "item", "result"]) {
+      if (data[k] && typeof data[k] === "object") out.push(data[k]);
+    }
+    out.push(data);
+  }
+  return out;
+}
+
+/** Ersten brauchbaren Treffer aus einer /media/batch-Antwort ziehen. */
+function pickFirstUploadTarget(data) {
+  for (const cand of uploadTargetCandidates(data)) {
+    const hit = pickUploadTarget(cand);
+    if (hit && (hit.uploadUrl || hit.mediaId)) return hit;
+  }
+  return null;
+}
+
+/** Medien-ID aus einer /media-Antwort ziehen (med_… bevorzugen). */
+function pickMediaId(data) {
+  const hit = pickUploadTarget(data);
+  return hit?.mediaId || null;
 }
 
 /* ------------------------------------------------------------------ */
@@ -346,22 +494,32 @@ export default async function handler(req, res) {
             error: `Postlake Media-Sign fehlgeschlagen: ${lakeError(bData, bRes.status)}`,
           });
         }
-        const item = pickList(bData)[0] || bData?.media || bData || {};
-        const uploadUrl = item.uploadUrl || item.putUrl || item.uploadURL || item.url || null;
-        const mediaId = item.id || item.mediaId || item.medId || null;
-        const headers = item.headers || item.uploadHeaders || {};
-        if (!uploadUrl || !mediaId) {
+        const target = pickFirstUploadTarget(bData);
+        if (!target || !target.uploadUrl || !target.mediaId) {
+          const first = pickList(bData)[0] || bData?.media || bData || {};
           return res.status(502).json({
             ok: false,
-            error: `Postlake gab keine Upload-URL zurück (Felder: ${Object.keys(item).join(",") || "leer"}).`,
+            error: `Postlake gab keine Upload-URL zurück (Felder: ${Object.keys(first).join(",") || "leer"}).`,
           });
         }
-        return res.status(200).json({ ok: true, uploadUrl, headers, mediaId, expiresIn: item.expiresIn || 300 });
+        return res.status(200).json({
+          ok: true,
+          uploadUrl: target.uploadUrl,
+          headers: target.headers,
+          mediaId: target.mediaId,
+          expiresIn: target.expiresIn,
+        });
       }
 
       /* ---- MEDIA-FROM-URL: öffentliche URL als Medienquelle ----
-       * 1) Versuch: POST /v1/media mit JSON { url } (MCP kann URL-Ingest).
-       * 2) Fallback: Server lädt Bytes selbst und POSTet sie roh weiter. */
+       * Kette (jeder Schritt wird für die Diagnose protokolliert):
+       *  1) { url }-Ingest: POST /v1/media mit JSON-URL (MCP-Weg).
+       *  2) Signierter PUT: Bytes serverseitig laden, via /media/batch eine
+       *     signierte PUT-URL holen und die Bytes dorthin PUTen (Header exakt
+       *     wie vorgegeben; Content-Type nur ergänzen, wenn case-insensitiv
+       *     nicht schon vorhanden — sonst schlägt die Signatur fehl).
+       *  3) RAW-Forward: rohe Bytes an POST /v1/media — NUR wenn ≤ 8 MB,
+       *     darüber nimmt das Gateway die Payload nicht (HTTP 413). */
       if (action === "media-from-url") {
         if (!needKey()) return;
         const url = String(body.url || "");
@@ -369,36 +527,94 @@ export default async function handler(req, res) {
         if (!/^https:\/\//i.test(url)) {
           return res.status(400).json({ ok: false, error: "Es wird eine öffentliche HTTPS-URL benötigt." });
         }
-        // Versuch 1: direkter URL-Ingest
+        const diag = [];
+        let sizeMB = null;
+        const mb = () => (sizeMB === null ? "?" : sizeMB.toFixed(1));
+
+        // Schritt 1: direkter URL-Ingest
         try {
           const direct = await lakeFetch(apiKey, "/media", { method: "POST", body: { url } });
-          const mid = direct.data?.id || direct.data?.media?.id || direct.data?.medId;
+          const mid = direct.res.ok ? pickMediaId(direct.data) : null;
           if (direct.res.ok && mid) {
             return res.status(200).json({ ok: true, mediaId: mid, via: "url" });
           }
-        } catch {
-          /* weiter mit Fallback */
+          diag.push(`url-ingest: HTTP ${direct.res.status} (${lakeError(direct.data, direct.res.status)})`);
+        } catch (e) {
+          diag.push(`url-ingest: ${e instanceof Error ? e.message : String(e)}`);
         }
-        // Versuch 2: Bytes serverseitig holen und roh hochladen
+
+        // Bytes serverseitig laden (Schritt 2 + 3 teilen sich den Download)
+        let buf = null;
         try {
           const fetched = await fetch(url);
-          if (!fetched.ok) throw new Error(`Quelldatei nicht ladbar (HTTP ${fetched.status})`);
-          const buf = Buffer.from(await fetched.arrayBuffer());
-          if (buf.byteLength === 0) throw new Error("Quelldatei ist leer.");
-          const up = await lakeFetch(
-            apiKey,
-            "/media",
-            { method: "POST", body: buf, headers: { "Content-Type": contentType }, timeoutMs: 55000 }
-          );
-          const mid = up.data?.id || up.data?.media?.id;
-          if (!up.res.ok || !mid) throw new Error(lakeError(up.data, up.res.status));
-          return res.status(200).json({ ok: true, mediaId: mid, via: "forward" });
+          if (!fetched.ok) throw new Error(`HTTP ${fetched.status}`);
+          buf = Buffer.from(await fetched.arrayBuffer());
+          if (buf.byteLength === 0) throw new Error("leere Datei");
+          sizeMB = buf.byteLength / (1024 * 1024);
         } catch (e) {
+          diag.push(`download: ${e instanceof Error ? e.message : String(e)}`);
           return res.status(502).json({
             ok: false,
-            error: `Medien-Upload fehlgeschlagen: ${e instanceof Error ? e.message : String(e)}`,
+            error: `Medien-Upload fehlgeschlagen (${mb()} MB) — ${diag.join(" · ")}`,
           });
         }
+
+        // Schritt 2: signierte PUT-URL via /media/batch, Bytes serverseitig dorthin
+        try {
+          const { res: bRes, data: bData } = await lakeFetch(apiKey, "/media/batch", {
+            method: "POST",
+            body: { items: [{ contentType, sizeBytes: buf.byteLength }] },
+          });
+          const target = bRes.ok ? pickFirstUploadTarget(bData) : null;
+          if (!bRes.ok) {
+            diag.push(`batch-sign: HTTP ${bRes.status} (${lakeError(bData, bRes.status)})`);
+          } else if (!target || !target.uploadUrl || !target.mediaId) {
+            diag.push("batch-sign: Antwort ohne Upload-URL/Media-ID");
+          } else {
+            // Signierte URLs verlangen EXAKT die vorgegebenen Header — Content-Type
+            // nur ergänzen, wenn er (case-insensitiv) nicht bereits gesetzt ist.
+            const putHeaders = { ...target.headers };
+            if (!Object.keys(putHeaders).some((k) => k.toLowerCase() === "content-type")) {
+              putHeaders["Content-Type"] = contentType;
+            }
+            const putRes = await fetch(target.uploadUrl, { method: "PUT", headers: putHeaders, body: buf });
+            if (putRes.ok) {
+              return res.status(200).json({ ok: true, mediaId: target.mediaId, via: "signed-put" });
+            }
+            const errText = String(await putRes.text().catch(() => "")).slice(0, 160);
+            diag.push(
+              `signed-put: HTTP ${putRes.status}${errText ? ` (${errText})` : ""}`
+            );
+          }
+        } catch (e) {
+          diag.push(`signed-put: ${e instanceof Error ? e.message : String(e)}`);
+        }
+
+        // Schritt 3: rohe Bytes an POST /v1/media (nur kleine Dateien → 8-MB-Limit)
+        if (sizeMB <= 8) {
+          try {
+            const up = await lakeFetch(apiKey, "/media", {
+              method: "POST",
+              body: buf,
+              headers: { "Content-Type": contentType },
+              timeoutMs: 55000,
+            });
+            const mid = up.res.ok ? pickMediaId(up.data) : null;
+            if (up.res.ok && mid) {
+              return res.status(200).json({ ok: true, mediaId: mid, via: "forward" });
+            }
+            diag.push(`raw-post: HTTP ${up.res.status} (${lakeError(up.data, up.res.status)})`);
+          } catch (e) {
+            diag.push(`raw-post: ${e instanceof Error ? e.message : String(e)}`);
+          }
+        } else {
+          diag.push(`raw-post: übersprungen — ${mb()} MB > 8 MB (Gateway-Limit, sonst HTTP 413)`);
+        }
+
+        return res.status(502).json({
+          ok: false,
+          error: `Medien-Upload fehlgeschlagen (${mb()} MB) — ${diag.join(" · ")}`,
+        });
       }
 
       /* ---- VALIDATE: kostenlose Pre-Publish-Prüfung ---- */
