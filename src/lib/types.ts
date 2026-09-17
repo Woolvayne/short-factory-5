@@ -24,6 +24,14 @@ export interface LocalRenderItem {
   blob?: Blob;
   blobUrl?: string;
   error?: string;
+  /** Posting-Status (alles läuft über Postlake) */
+  posting?: boolean;
+  /** Video wurde an Postlake übergeben (manuell oder Autopilot) */
+  posted?: boolean;
+  /** Postlake-Post-ID nach erfolgreichem Versand */
+  postlakePostId?: string | null;
+  /** Fehlermeldung des letzten Sendeversuchs (null nach Erfolg) */
+  postError?: string | null;
 }
 
 export interface VoiceTake {

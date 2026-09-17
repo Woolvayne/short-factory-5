@@ -70,6 +70,7 @@ export function AssemblyPanel({
   errorCount,
   renderProgress,
   error,
+  disabled = false,
   onPrepare,
   onRenderAll,
   onCancel,
@@ -82,6 +83,7 @@ export function AssemblyPanel({
   errorCount: number;
   renderProgress: number;
   error: string | null;
+  disabled?: boolean;
   onPrepare: () => void;
   onRenderAll: () => void;
   onCancel: () => void;
@@ -104,12 +106,12 @@ export function AssemblyPanel({
         <button
           type="button"
           onClick={onPrepare}
-          disabled={!canPrepare || busy}
+          disabled={!canPrepare || busy || disabled}
           className={cn(
             "group relative w-full overflow-hidden border transition-all duration-300",
             preparing
               ? "border-amber-warn/70 bg-coal-850"
-              : canPrepare && !busy
+              : canPrepare && !busy && !disabled
                 ? "border-coal-500 bg-coal-850 hover:border-volt-400 hover:bg-coal-800"
                 : "border-coal-700 bg-coal-850 opacity-60"
           )}
@@ -146,8 +148,8 @@ export function AssemblyPanel({
         {/* STEP B — the render button */}
         <button
           type="button"
-          onClick={rendering ? onCancel : onRenderAll}
-          disabled={!hasStaged && !rendering}
+          onClick={rendering && !disabled ? onCancel : onRenderAll}
+          disabled={(!hasStaged && !rendering) || disabled}
           className={cn(
             "group relative w-full overflow-hidden border transition-all duration-300",
             rendering
@@ -341,6 +343,7 @@ export function OutputPanel({
   elapsed,
   activeIndex,
   activeProgress,
+  disabled = false,
   onBuildZip,
   onRenderOne,
   onPostItems,
@@ -352,12 +355,15 @@ export function OutputPanel({
   elapsed: number;
   activeIndex: number | null;
   activeProgress: number;
+  disabled?: boolean;
   onBuildZip: () => void;
   onRenderOne: (index: number) => void;
   onPostItems: (targetItems: LocalRenderItem[]) => void;
 }) {
   const [preview, setPreview] = useState<LocalRenderItem | null>(null);
   const doneCount = items.filter((r) => r.status === "done").length;
+  const postingCount = items.filter((r) => r.posting).length;
+  const postedCount = items.filter((r) => r.posted).length;
   const busy = phase === "preparing" || phase === "rendering";
 
   const cells = useMemo<(LocalRenderItem | null)[]>(() => {
@@ -504,19 +510,39 @@ export function OutputPanel({
                 {/* per-unit render + post controls */}
                 {(item.status === "staged" || item.status === "done" || item.status === "error") && (
                   <div className="grid gap-1.5">
-                    {item.status === "done" && (
-                      <button
-                        type="button"
-                        onClick={() => onPostItems([item])}
-                        className="bg-heat flex min-h-[34px] w-full items-center justify-center gap-1.5 border border-volt-400 px-2 py-1.5 font-mono text-[9.5px] font-bold tracking-widest text-coal-950 transition-opacity hover:opacity-90"
-                      >
-                        <Send className="size-3" strokeWidth={2.5} /> POST
-                      </button>
+                    {item.status === "done" &&
+                      (item.posting ? (
+                        <button
+                          type="button"
+                          disabled
+                          className="bg-heat flex min-h-[34px] w-full cursor-wait items-center justify-center gap-1.5 border border-volt-400 px-2 py-1.5 font-mono text-[9.5px] font-bold tracking-widest text-coal-950 opacity-70"
+                        >
+                          <Loader2 className="size-3 animate-spin" strokeWidth={2.5} /> POSTE …
+                        </button>
+                      ) : item.posted ? (
+                        <div className="flex min-h-[34px] w-full items-center justify-center gap-1.5 border border-volt-400/60 bg-volt-400/10 px-2 py-1.5 font-mono text-[9.5px] font-bold tracking-widest text-volt-300">
+                          <Check className="size-3" strokeWidth={2.5} /> GEPOSTET
+                        </div>
+                      ) : (
+                        <button
+                          type="button"
+                          onClick={() => onPostItems([item])}
+                          disabled={postingCount > 0}
+                          className="bg-heat flex min-h-[34px] w-full items-center justify-center gap-1.5 border border-volt-400 px-2 py-1.5 font-mono text-[9.5px] font-bold tracking-widest text-coal-950 transition-opacity hover:opacity-90 disabled:cursor-wait disabled:opacity-40"
+                        >
+                          <Send className="size-3" strokeWidth={2.5} />{" "}
+                          {item.postError ? "ERNEUT POSTEN" : "POST"}
+                        </button>
+                      ))}
+                    {item.status === "done" && item.postError && !item.posting && (
+                      <p className="font-mono text-[8.5px] leading-snug text-rose-err">
+                        {item.postError}
+                      </p>
                     )}
                     <button
                       type="button"
                       onClick={() => onRenderOne(item.index)}
-                      disabled={busy}
+                      disabled={busy || disabled}
                       className={cn(
                         "flex min-h-[34px] w-full items-center justify-center gap-1.5 border px-2 py-1.5 font-mono text-[9.5px] font-bold tracking-widest transition-colors disabled:opacity-40",
                         item.status === "staged"
@@ -568,10 +594,22 @@ export function OutputPanel({
               <button
                 type="button"
                 onClick={() => onPostItems(items.filter((i) => i.status === "done"))}
-                className="bg-heat flex min-h-[44px] items-center gap-2 border border-volt-400 px-4 py-2.5 font-display text-sm font-black tracking-tight text-coal-950 uppercase transition-opacity hover:opacity-90"
+                disabled={postingCount > 0}
+                title="Alle fertigen Videos direkt über Postlake posten"
+                className="bg-heat flex min-h-[44px] items-center gap-2 border border-volt-400 px-4 py-2.5 font-display text-sm font-black tracking-tight text-coal-950 uppercase transition-opacity hover:opacity-90 disabled:opacity-60"
               >
-                <Send className="size-4" strokeWidth={2.5} />
-                Post · {doneCount} Video{doneCount === 1 ? "" : "s"}
+                {postingCount > 0 ? (
+                  <>
+                    <Loader2 className="size-4 animate-spin" strokeWidth={2.5} />
+                    Poste {postingCount}/{doneCount}…
+                  </>
+                ) : (
+                  <>
+                    <Send className="size-4" strokeWidth={2.5} />
+                    Post all · {doneCount} Video{doneCount === 1 ? "" : "s"}
+                    {postedCount > 0 ? ` (${postedCount} ✓)` : ""}
+                  </>
+                )}
               </button>
             )}
             {zip.url && zip.name ? (
