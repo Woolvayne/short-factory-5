@@ -13,11 +13,10 @@ import {
   Wifi,
 } from "lucide-react";
 import Header from "./components/Header";
-import CalendarView from "./components/CalendarView";
-import PostScheduleModal from "./components/PostScheduleModal";
-import BufferPostEditor from "./components/BufferPostEditor";
-import BufferCalendar from "./components/BufferCalendar";
-import { AnalyticsPanel, DashboardStats, SocialAccounts } from "./components/SocialHub";
+import PostlakeAccounts, { DashboardStats } from "./components/PostlakeAccounts";
+import PostlakeCalendar from "./components/PostlakeCalendar";
+import PostlakeAnalytics from "./components/PostlakeAnalytics";
+import AutopilotPanel from "./components/AutopilotPanel";
 import type { NavSection } from "./components/Header";
 import IdeasPanel from "./components/IdeasPanel";
 import SettingsPanel from "./components/SettingsPanel";
@@ -57,18 +56,35 @@ import {
   putAsset,
 } from "./lib/storage";
 import {
-  fetchScheduledPosts,
-  loadLocalPosts,
-  type ScheduledPost,
-} from "./lib/scheduler";
-import {
-  fetchChannels,
-  fetchPosts as fetchBufferPosts,
+  createPosts,
+  fetchStatus,
+  hashtagsToList,
   loadCachedPosts,
-  type AnalyticsTotals,
-  type BufferChannel,
-  type BufferPost,
-} from "./lib/buffer";
+  loadPrefs,
+  makeLocalPost,
+  planFreeSlots,
+  refreshOpenPosts,
+  resolveAccountIds,
+  saveCachedPosts,
+  savePrefs,
+  syncPostsFromLake,
+  type CreateJob,
+  type LakePost,
+  type PostlakePrefs,
+  type PostlakeStatus,
+} from "./lib/postlake";
+import {
+  loadAutopilotConfig,
+  loadAutopilotStats,
+  msUntilNextDispatch,
+  recordDispatch,
+  saveAutopilotConfig,
+  saveAutopilotStats,
+  type AutopilotConfig,
+  type AutopilotLogEntry,
+  type AutopilotStats,
+} from "./lib/autopilot";
+import { uploadClipForPostlake } from "./lib/upload";
 import { synthesizeSpeech } from "./lib/tts";
 import { recorderSupported, renderLocal } from "./lib/renderer";
 import {
@@ -99,6 +115,19 @@ const IDLE_FETCH: FetchState = {
   platform: null,
 };
 
+interface DispatchJob {
+  key: string;
+  blob: Blob;
+  mime: string;
+  index: number;
+  round: number;
+  text: string;
+  title: string;
+  hashtags: string[];
+  attempts: number;
+  previewUrl: string;
+}
+
 type AnyAudioContext = typeof AudioContext;
 
 export default function App() {
@@ -125,20 +154,27 @@ export default function App() {
   const [ideaGenAll, setIdeaGenAll] = useState(false);
   const [ideaGenIndex, setIdeaGenIndex] = useState<number | null>(null);
 
-  /* social scheduling */
-  const [scheduledPosts, setScheduledPosts] = useState<ScheduledPost[]>(() => loadLocalPosts());
-  const [hasZernioKey, setHasZernioKey] = useState(false);
-  const [postModalItems, setPostModalItems] = useState<LocalRenderItem[] | null>(null);
+  /* postlake social layer (einziger Post- & Analyseweg) */
+  const [lakePosts, setLakePosts] = useState<LakePost[]>(() => loadCachedPosts());
+  const [lakeStatus, setLakeStatus] = useState<PostlakeStatus>({
+    hasApiKey: false,
+    apiStatus: "missing_key",
+    me: null,
+    credits: null,
+    billing: null,
+    accounts: [],
+  });
+  const [lakeLoading, setLakeLoading] = useState(false);
+  const [prefs, setPrefsState] = useState<PostlakePrefs>(() => loadPrefs());
   const [vaultReady, setVaultReady] = useState(false);
 
-  /* buffer social layer */
-  const [bufferPosts, setBufferPosts] = useState<BufferPost[]>(() => loadCachedPosts());
-  const [channels, setChannels] = useState<BufferChannel[]>([]);
-  const [bufferKey, setBufferKey] = useState(false);
-  const [bufferLoading, setBufferLoading] = useState(false);
-  const [bufferError, setBufferError] = useState<string | null>(null);
-  const [analyticsTotals, setAnalyticsTotals] = useState<AnalyticsTotals | null>(null);
-  const [editorItems, setEditorItems] = useState<LocalRenderItem[] | null>(null);
+  /* autopilot */
+  const [apConfig, setApConfigState] = useState<AutopilotConfig>(() => loadAutopilotConfig());
+  const [apRunning, setApRunning] = useState(false);
+  const [apStats, setApStats] = useState<AutopilotStats>(() => loadAutopilotStats());
+  const [apLog, setApLog] = useState<AutopilotLogEntry[]>([]);
+  const [apQueueDepth, setApQueueDepth] = useState(0);
+  const [apPosting, setApPosting] = useState(false);
 
   const factoryRef = useRef<HTMLDivElement>(null);
   const calendarRef = useRef<HTMLDivElement>(null);
@@ -159,6 +195,39 @@ export default function App() {
   const startedAtRef = useRef<number | null>(null);
   const audioCtxRef = useRef<AudioContext | null>(null);
   const cancelRef = useRef<{ cancelled: boolean }>({ cancelled: false });
+
+  /* frische Spiegel für den Autopilot-Loop (keine stale closures) */
+  const ideasRef = useRef(ideas);
+  ideasRef.current = ideas;
+  const settingsStateRef = useRef(settings);
+  settingsStateRef.current = settings;
+  const phaseRef = useRef<Phase>("idle");
+  phaseRef.current = phase;
+  const modeRef = useRef(mode);
+  modeRef.current = mode;
+  const lakeStatusRef = useRef(lakeStatus);
+  lakeStatusRef.current = lakeStatus;
+  const lakePostsRef = useRef(lakePosts);
+  lakePostsRef.current = lakePosts;
+  const prefsRef = useRef(prefs);
+  prefsRef.current = prefs;
+  const apConfigRef = useRef(apConfig);
+  apConfigRef.current = apConfig;
+
+  /* autopilot-laufzeit */
+  const apRunningRef = useRef(false);
+  const apRunIdRef = useRef(0);
+  const apRoundRef = useRef(0);
+  const apQueueRef = useRef<DispatchJob[]>([]);
+  const apQueuedKeys = useRef<Set<string>>(new Set());
+  const apPostingRef = useRef(false);
+  const apAccountRef = useRef<string[]>([]);
+  const wakeLockRef = useRef<{ release: () => Promise<void> } | null>(null);
+  const prepareRef = useRef<(ideasOverride?: string[]) => Promise<number>>(async () => 0);
+  const renderRef = useRef<(indexes: number[], viaAutopilot?: boolean) => Promise<void>>(
+    async () => {}
+  );
+  const resliceRef = useRef<(() => void) | null>(null);
 
   useEffect(() => saveSettings(settings), [settings]);
 
@@ -208,39 +277,34 @@ export default function App() {
     };
   }, []);
 
-  /* ---- load scheduled posts + Zernio key status ---- */
-  useEffect(() => {
-    let cancelled = false;
-    (async () => {
-      const { posts, hasApiKey } = await fetchScheduledPosts();
-      if (cancelled) return;
-      setScheduledPosts(posts);
-      setHasZernioKey(hasApiKey);
-    })();
-    return () => {
-      cancelled = true;
-    };
-  }, []);
-
-  /* ---- Buffer: load channels + posts (Buffer is the source of truth) ---- */
-  const syncBuffer = useCallback(async () => {
-    setBufferLoading(true);
+  /* ---- Postlake: Status + Posts laden (Postlake ist die Quelle der Wahrheit) ---- */
+  const syncLake = useCallback(async () => {
+    setLakeLoading(true);
     try {
-      const [ch, po] = await Promise.all([fetchChannels(), fetchBufferPosts()]);
-      setChannels(ch.channels.length ? ch.channels : po.channels);
-      setBufferKey(ch.hasApiKey || po.hasApiKey);
-      setBufferPosts(po.posts);
-      setBufferError(ch.error ?? po.error ?? null);
+      const st = await fetchStatus();
+      setLakeStatus(st);
+      if (st.hasApiKey && st.apiStatus === "connected") {
+        const { posts } = await syncPostsFromLake({ limit: 100 });
+        setLakePosts(posts);
+      }
     } catch (e) {
-      setBufferError(e instanceof Error ? e.message : String(e));
+      console.warn("postlake sync failed", e);
     } finally {
-      setBufferLoading(false);
+      setLakeLoading(false);
     }
   }, []);
 
   useEffect(() => {
-    void syncBuffer();
-  }, [syncBuffer]);
+    void syncLake();
+  }, [syncLake]);
+
+  /* Autopilot-Worker beim Unmount garantiert beenden */
+  useEffect(() => {
+    return () => {
+      apRunIdRef.current++;
+      apRunningRef.current = false;
+    };
+  }, []);
 
   const jumpTo = useCallback((section: NavSection) => {
     const map: Record<NavSection, React.RefObject<HTMLDivElement | null>> = {
@@ -517,6 +581,17 @@ export default function App() {
 
   const canPrepare = blockers.length === 0;
 
+  /* Autopilot braucht nur Footage + Recorder — Titel schreibt er selbst */
+  const autopilotBlockers = useMemo(() => {
+    const out: string[] = [];
+    if (!footageReady)
+      out.push(mode === "single" ? "LOAD A SOURCE VIDEO" : `${readyBgs.length}/10 CLIPS LOADED`);
+    if (!recorderSupported()) out.push("BROWSER CANNOT RECORD VIDEO");
+    if (busy) out.push("MANUAL RUN IN PROGRESS");
+    return out;
+  }, [footageReady, mode, readyBgs.length, busy]);
+  const canAutostart = autopilotBlockers.length === 0 && !apRunning;
+
   const patchItem = useCallback((index: number, patch: Partial<LocalRenderItem>) => {
     setItems((prev) => prev.map((r) => (r.index === index ? { ...r, ...patch } : r)));
   }, []);
@@ -525,8 +600,19 @@ export default function App() {
   /*  STEP ① prepare — scripts + voices only                       */
   /* ------------------------------------------------------------ */
 
-  const prepare = useCallback(async () => {
-    if (!canPrepare || busy) return;
+  const prepare = useCallback(async (ideasOverride?: string[]): Promise<number> => {
+    /* Guards über Ref (stale-closure-sicher für den Autopilot-Loop) */
+    if (apRunningRef.current && ideasOverride === undefined) return 0;
+    if (phaseRef.current === "preparing" || phaseRef.current === "rendering") return 0;
+    const ideaList = ideasOverride ?? ideas;
+    const listReady = ideaList.length === 10 && ideaList.every((i) => i.trim().length > 2);
+    const readyCount = bgsRef.current.filter((b) => b.status === "ready").length;
+    const footageOk =
+      modeRef.current === "single"
+        ? !!sourceRef.current && clipsRef.current.length === 10
+        : readyCount === 10;
+    if (!listReady || !footageOk || !recorderSupported()) return 0;
+
     setError(null);
     setZip(IDLE_ZIP);
     for (const it of itemsRef.current) if (it.blobUrl) URL.revokeObjectURL(it.blobUrl);
@@ -538,9 +624,10 @@ export default function App() {
     cancelRef.current = { cancelled: false };
     startedAtRef.current = Date.now();
     setElapsed(0);
+    phaseRef.current = "preparing";
     setPhase("preparing");
 
-    const seeded: LocalRenderItem[] = ideas.map((idea, index) => ({
+    const seeded: LocalRenderItem[] = ideaList.map((idea, index) => ({
       index,
       idea: idea.trim(),
       status: "script",
@@ -594,21 +681,27 @@ export default function App() {
     }
 
     const staged = itemsRef.current.filter((i) => i.status === "staged").length;
-    setPhase(staged > 0 ? "staged" : "failed");
+    const endPhase: Phase = staged > 0 ? "staged" : "failed";
+    phaseRef.current = endPhase;
+    setPhase(endPhase);
     if (staged === 0)
       setError("Nothing could be prepared — voice synthesis needs an internet connection.");
-  }, [canPrepare, busy, ideas, settings, patchItem, ensureAudioCtx]);
+    return staged;
+  }, [ideas, settings, patchItem, ensureAudioCtx]);
 
   /* ------------------------------------------------------------ */
   /*  STEP ② render — explicit, per unit or all                    */
   /* ------------------------------------------------------------ */
 
   const renderIndexes = useCallback(
-    async (indexes: number[]) => {
-      if (indexes.length === 0 || busy) return;
+    async (indexes: number[], viaAutopilot = false) => {
+      if (indexes.length === 0) return;
+      if (apRunningRef.current && !viaAutopilot) return;
+      if (phaseRef.current === "preparing" || phaseRef.current === "rendering") return;
       setError(null);
       cancelRef.current = { cancelled: false };
       if (!startedAtRef.current) startedAtRef.current = Date.now();
+      phaseRef.current = "rendering";
       setPhase("rendering");
 
       const ac = await ensureAudioCtx();
@@ -709,6 +802,528 @@ export default function App() {
     cancelRef.current.cancelled = true;
   }, []);
 
+  /* Stabile Funktions-Spiegel für die Autopilot-Worker (Long-Running-Loops) */
+  useEffect(() => {
+    prepareRef.current = prepare;
+    renderRef.current = renderIndexes;
+    resliceRef.current = reslice;
+  });
+
+  /* ------------------------------------------------------------ */
+  /*  posting prefs + autopilot state helpers                       */
+  /* ------------------------------------------------------------ */
+
+  const setPrefs = useCallback((p: PostlakePrefs) => {
+    setPrefsState(p);
+    savePrefs(p);
+  }, []);
+
+  const setApConfig = useCallback((c: AutopilotConfig) => {
+    setApConfigState(c);
+    saveAutopilotConfig(c);
+  }, []);
+
+  const apLogIt = useCallback((kind: AutopilotLogEntry["kind"], text: string) => {
+    setApLog((prev) => [...prev.slice(-199), { at: Date.now(), kind, text }]);
+  }, []);
+
+  const bumpStats = useCallback((updater: (prev: AutopilotStats) => Partial<AutopilotStats>) => {
+    setApStats((prev) => {
+      const next = { ...prev, ...updater(prev), lastActivityAt: Date.now() };
+      saveAutopilotStats(next);
+      return next;
+    });
+  }, []);
+
+  /* ------------------------------------------------------------ */
+  /*  POST ALL — direkt über Postlake, ohne Nachfrage               */
+  /* ------------------------------------------------------------ */
+
+  const postItems = useCallback(
+    async (targets: LocalRenderItem[]) => {
+      const videos = targets.filter((t) => t.status === "done" && t.blob && !t.posting);
+      if (videos.length === 0 || apRunningRef.current) return;
+
+      const p = prefsRef.current;
+      const { ids, missing } = resolveAccountIds(
+        p.platforms,
+        lakeStatusRef.current.accounts,
+        p.accountIds
+      );
+      if (ids.length === 0) {
+        setError(
+          missing.length > 0
+            ? `Keine Kanäle für ${missing.join(", ")} verbunden — bitte erst in Postlake (app.postlake.dev → Channels) verbinden und SYNC drücken.`
+            : "Keine Postlake-Kanäle verbunden — bitte erst verbinden und SYNC drücken."
+        );
+        return;
+      }
+      if (missing.length > 0) {
+        setError(
+          `Hinweis: keine Kanäle für ${missing.join(", ")} — poste auf ${ids.length} Kanal/Kanäle.`
+        );
+      } else {
+        setError(null);
+      }
+
+      for (const v of videos) patchItem(v.index, { posting: true, postError: null });
+
+      try {
+        const order: number[] = [];
+        const jobs: CreateJob[] = [];
+        const slots =
+          p.mode === "scheduled"
+            ? planFreeSlots(lakePostsRef.current, {
+                count: videos.length,
+                preferredTimes: p.preferredTimes,
+                timezone: p.timezone,
+              })
+            : [];
+
+        for (let k = 0; k < videos.length; k++) {
+          const v = videos[k];
+          let mediaId = "";
+          try {
+            mediaId = await uploadClipForPostlake(v.blob!, `manual-${v.index}`, v.mime);
+          } catch (uploadErr) {
+            // Ohne Key: kein Upload möglich → lokal zwischenspeichern statt scheitern
+            if (lakeStatusRef.current.hasApiKey) throw uploadErr;
+          }
+          const tagList = hashtagsToList(p.hashtags);
+          const caption = (p.caption || v.idea || "").trim();
+          const stamp = Date.now();
+          const rand = Math.random().toString(36).slice(2, 7);
+          const localId = `lake_${stamp}_${v.index}_${rand}`;
+          const slot = slots[k];
+          order.push(v.index);
+          jobs.push({
+            localId,
+            text: [caption, tagList.join(" ")].filter(Boolean).join("\n\n"),
+            title: (v.idea || `Short ${v.index + 1}`).slice(0, 90),
+            hashtags: tagList,
+            accounts: ids,
+            media: mediaId ? [mediaId] : [],
+            previewUrl: v.blobUrl,
+            ...(slot ? { scheduledAt: slot.naive, timezone: p.timezone } : {}),
+            idempotencyKey: `${localId}_key`,
+          });
+        }
+
+        const res = await createPosts(jobs);
+        setLakePosts(res.posts);
+
+        for (let k = 0; k < order.length; k++) {
+          const idx = order[k];
+          const post = res.posts.find((x) => x.id === jobs[k].localId);
+          if (post && post.status !== "Fehler") {
+            patchItem(idx, {
+              posting: false,
+              posted: true,
+              postlakePostId: post.postlakeId,
+              postError: null,
+            });
+          } else {
+            patchItem(idx, {
+              posting: false,
+              postError:
+                post?.errorMessage ||
+                res.error ||
+                "Versand fehlgeschlagen — Details im Kalender.",
+            });
+          }
+        }
+
+        if (!res.hasApiKey) {
+          setError(
+            "POSTLAKE_API_KEY fehlt: Posts wurden lokal zwischengespeichert (Kalender) und gehen live, sobald der Key gesetzt ist."
+          );
+        } else if (res.failed > 0) {
+          setError(
+            `${res.failed} von ${jobs.length} Posts meldeten Fehler — Details im Kalender, dort ggf. erneut posten.`
+          );
+        }
+      } catch (e) {
+        const msg = e instanceof Error ? e.message : String(e);
+        for (const v of videos) patchItem(v.index, { posting: false, postError: msg });
+        setError(`Posten abgebrochen: ${msg}`);
+      }
+    },
+    [patchItem]
+  );
+
+  /* ------------------------------------------------------------ */
+  /*  AUTOPILOT — rendern + posten ohne Klick                       */
+  /* ------------------------------------------------------------ */
+
+  const stopAutopilot = useCallback(
+    (auto = false) => {
+      apRunIdRef.current++;
+      apRunningRef.current = false;
+      setApRunning(false);
+      setApPosting(false);
+      apPostingRef.current = false;
+      cancelRef.current.cancelled = true;
+      try {
+        void wakeLockRef.current?.release();
+      } catch {
+        /* ignore */
+      }
+      wakeLockRef.current = null;
+      if (auto) {
+        apLogIt("ok", "Autopilot fertig: Runde abgeschlossen, Sende-Queue leer.");
+      } else {
+        apLogIt(
+          "warn",
+          `Autopilot gestoppt — ${apQueueRef.current.length} Video(s) bleiben in der Queue für den Neustart.`
+        );
+      }
+    },
+    [apLogIt]
+  );
+
+  /** Produktions-Loop: Ideen → Prepare → Render → Queue → (nächste Runde). */
+  const runAutopilotLoop = useCallback(async () => {
+    const runId = apRunIdRef.current;
+    const alive = () => apRunningRef.current && apRunIdRef.current === runId;
+
+    // Kanäle frisch auflösen
+    try {
+      const st = await fetchStatus();
+      if (!alive()) return;
+      setLakeStatus(st);
+      const wanted = apConfigRef.current;
+      const { ids, missing } = resolveAccountIds(wanted.platforms, st.accounts, wanted.accountIds);
+      apAccountRef.current = ids;
+      if (missing.length > 0) {
+        apLogIt("warn", `Keine Kanäle für: ${missing.join(", ")} — poste auf ${ids.length} Kanal/Kanäle.`);
+      }
+      if (ids.length === 0) {
+        apLogIt(
+          "warn",
+          st.hasApiKey
+            ? "Keine Kanäle verbunden — Videos werden nur lokal zwischengespeichert."
+            : "Kein POSTLAKE_API_KEY — Videos werden nur lokal zwischengespeichert."
+        );
+      }
+      const credits = st.credits?.total;
+      if (typeof credits === "number") {
+        apLogIt(
+          credits <= 10 ? "warn" : "info",
+          `Postlake-Guthaben: ${credits} Credits (1 Credit pro Kanal-Post).`
+        );
+      }
+    } catch (e) {
+      apLogIt("warn", `Kanal-Sync fehlgeschlagen: ${e instanceof Error ? e.message : e}`);
+    }
+
+    while (alive()) {
+      apRoundRef.current++;
+      const round = apRoundRef.current;
+      bumpStats(() => ({ rounds: round }));
+
+      // Rückstau-Schutz: Bytes leben im Speicher — max. 30 wartende Videos
+      while (alive() && apQueueRef.current.length >= 30) {
+        apLogIt("info", "Sende-Queue voll (30) — warte auf Versand, bevor es weitergeht …");
+        await sleep(15000);
+      }
+      if (!alive()) break;
+
+      try {
+        // 1) Ideen sichern (sonst frische schreiben lassen)
+        let ideaList = ideasRef.current;
+        if (!(ideaList.length === 10 && ideaList.every((i) => i.trim().length > 2))) {
+          apLogIt("info", `Runde ${round}: schreibe 10 neue Titel …`);
+          const s = settingsStateRef.current;
+          const { ideas: fresh } = await generateIdeas(10, {
+            qwenKey: s.qwenKey,
+            mistralKey: s.mistralKey,
+            words: s.storyWords,
+            temperature: s.temperature,
+            styleInstruction: styleInstruction(s),
+          });
+          if (!alive()) break;
+          ideaList = (fresh.length >= 10 ? fresh.slice(0, 10) : [...fresh, ...ideaList]).slice(0, 10);
+          setIdeas(ideaList);
+        }
+
+        // Ab Runde 2: neue Clip-Fenster für Abwechslung
+        if (round > 1 && modeRef.current === "single" && sourceRef.current) {
+          resliceRef.current?.();
+        }
+
+        // 2) Scripts + Voices
+        apLogIt("info", `Runde ${round}: Scripts + Voices …`);
+        const staged = await prepareRef.current(ideaList);
+        if (!alive()) break;
+        if (!staged || staged <= 0) {
+          apLogIt("error", "Prepare brachte nichts — warte 30 s, dann erneut.");
+          await sleep(30000);
+          continue;
+        }
+
+        // 3) Rendern
+        const targets = itemsRef.current
+          .filter((i) => i.status === "staged")
+          .map((i) => i.index);
+        apLogIt("info", `Runde ${round}: rendere ${targets.length} Videos …`);
+        await renderRef.current(targets, true);
+        if (!alive()) break;
+
+        // 4) Fertige in die Sende-Queue
+        const dones = itemsRef.current.filter((i) => i.status === "done" && i.blob);
+        bumpStats((prev) => ({ totalRendered: prev.totalRendered + dones.length }));
+        const cfg2 = apConfigRef.current;
+        const tagList = hashtagsToList(cfg2.hashtags);
+        let queued = 0;
+        for (const d of dones) {
+          if (d.posted) continue;
+          const key = `${round}:${d.index}`;
+          if (apQueuedKeys.current.has(key)) continue;
+          apQueuedKeys.current.add(key);
+          const caption = (cfg2.caption || d.idea || "").trim();
+          apQueueRef.current.push({
+            key,
+            round,
+            index: d.index,
+            blob: d.blob!,
+            mime: d.mime || "video/mp4",
+            title: (d.idea || `Short ${d.index + 1}`).slice(0, 90),
+            text: [caption, tagList.join(" ")].filter(Boolean).join("\n\n"),
+            hashtags: tagList,
+            previewUrl: d.blobUrl || "",
+            attempts: 0,
+          });
+          queued++;
+        }
+        setApQueueDepth(apQueueRef.current.length);
+        apLogIt(
+          "ok",
+          `Runde ${round}: ${dones.length} Videos fertig, ${queued} eingereiht (Queue: ${apQueueRef.current.length}).`
+        );
+
+        if (!cfg2.loopRounds) {
+          apLogIt("info", "Endlos-Modus aus — warte bis die Queue leer ist …");
+          while (alive() && (apQueueRef.current.length > 0 || apPostingRef.current)) {
+            await sleep(1000);
+          }
+          break;
+        }
+        await sleep(2000);
+      } catch (e) {
+        apLogIt("error", `Runde ${round} abgebrochen: ${e instanceof Error ? e.message : String(e)}`);
+        await sleep(10000);
+      }
+    }
+
+    if (apRunningRef.current && apRunIdRef.current === runId) {
+      stopAutopilot(true);
+    }
+  }, [apLogIt, bumpStats, stopAutopilot]);
+
+  /** Versand-Worker: ein Video nach dem anderen, im Stunden-Limit. */
+  const runDispatchWorker = useCallback(async () => {
+    const runId = apRunIdRef.current;
+    const alive = () => apRunningRef.current && apRunIdRef.current === runId;
+
+    while (alive()) {
+      const job = apQueueRef.current[0];
+      if (!job) {
+        await sleep(1000);
+        continue;
+      }
+
+      // Stunden-Limit einhalten (in 1-s-Scheiben, damit STOP sofort greift)
+      let wait = msUntilNextDispatch(apConfigRef.current.videosPerHour);
+      while (alive() && wait > 0) {
+        const slice = Math.min(wait, 1000);
+        await sleep(slice);
+        wait -= slice;
+      }
+      if (!alive()) break;
+      const head = apQueueRef.current[0];
+      if (!head || head.key !== job.key) continue;
+
+      setApPosting(true);
+      apPostingRef.current = true;
+      const sameRound = () => apRoundRef.current === job.round;
+      if (sameRound()) patchItem(job.index, { posting: true, postError: null });
+
+      try {
+        const cfg = apConfigRef.current;
+        const accounts =
+          apAccountRef.current.length > 0
+            ? apAccountRef.current
+            : resolveAccountIds(cfg.platforms, lakeStatusRef.current.accounts, cfg.accountIds).ids;
+        // Kanäle können mid-run dazukommen (Poller aktualisiert den Status)
+        if (accounts.length > 0) apAccountRef.current = accounts;
+
+        let scheduledAt: string | undefined;
+        const timezone = "Europe/Berlin";
+        if (cfg.mode === "scheduled") {
+          const slot = planFreeSlots(lakePostsRef.current, {
+            count: 1,
+            preferredTimes: ["06:00", "20:00"],
+            timezone,
+          })[0];
+          if (slot) scheduledAt = slot.naive;
+        }
+
+        // Keine Kanäle (kein Key / nichts verbunden): lokal cachen, nichts verlieren
+        if (accounts.length === 0) {
+          // Stabile ID pro Job: Retries teilen sich Key + Idempotency (kein Doppel-Post)
+          const localId = `lake_auto_${job.key.replace(":", "_")}`;
+          const local = makeLocalPost({
+            localId,
+            text: job.text,
+            title: job.title,
+            hashtags: job.hashtags,
+            accounts: [],
+            media: [],
+            previewUrl: job.previewUrl,
+            ...(scheduledAt ? { scheduledAt, timezone } : {}),
+            idempotencyKey: `${localId}_key`,
+          });
+          const merged = [local, ...lakePostsRef.current].slice(0, 500);
+          saveCachedPosts(merged);
+          setLakePosts(merged);
+          recordDispatch();
+          apQueueRef.current.shift();
+          setApQueueDepth(apQueueRef.current.length);
+          bumpStats((prev) => ({ totalPosted: prev.totalPosted + 1 }));
+          if (sameRound()) {
+            patchItem(job.index, { posting: false, posted: true, postlakePostId: null, postError: null });
+          }
+          apLogIt("warn", `Video #${job.index + 1} (R${job.round}) lokal zwischengespeichert (keine Kanäle).`);
+          continue;
+        }
+
+        apLogIt("info", `Lade Video #${job.index + 1} (R${job.round}) hoch …`);
+        const mediaId = await uploadClipForPostlake(job.blob, `auto-r${job.round}-${job.index}`, job.mime);
+        if (!alive()) {
+          if (sameRound()) patchItem(job.index, { posting: false });
+          break;
+        }
+
+        const localId = `lake_auto_${job.key.replace(":", "_")}`;
+        const res = await createPosts([
+          {
+            localId,
+            text: job.text,
+            title: job.title,
+            hashtags: job.hashtags,
+            accounts,
+            media: [mediaId],
+            previewUrl: job.previewUrl,
+            ...(scheduledAt ? { scheduledAt, timezone } : {}),
+            idempotencyKey: `${localId}_key`,
+          },
+        ]);
+        setLakePosts(res.posts);
+        recordDispatch();
+        apQueueRef.current.shift();
+        setApQueueDepth(apQueueRef.current.length);
+
+        const created = res.posts.find((x) => x.id === localId);
+        if (created && created.status !== "Fehler") {
+          bumpStats((prev) => ({ totalPosted: prev.totalPosted + 1 }));
+          if (sameRound()) {
+            patchItem(job.index, {
+              posting: false,
+              posted: true,
+              postlakePostId: created.postlakeId,
+              postError: null,
+            });
+          }
+          apLogIt(
+            "ok",
+            res.hasApiKey
+              ? `Video #${job.index + 1} (R${job.round}) → Postlake (${created.status}).`
+              : `Video #${job.index + 1} (R${job.round}) lokal zwischengespeichert (kein Key).`
+          );
+        } else {
+          throw new Error(created?.errorMessage || res.error || "Versand fehlgeschlagen.");
+        }
+      } catch (e) {
+        const msg = e instanceof Error ? e.message : String(e);
+        job.attempts++;
+        if (job.attempts >= 3) {
+          apQueueRef.current.shift();
+          bumpStats((prev) => ({ totalFailed: prev.totalFailed + 1 }));
+          if (sameRound()) patchItem(job.index, { posting: false, postError: msg });
+          apLogIt("error", `Video #${job.index + 1} (R${job.round}) aufgegeben: ${msg}`);
+        } else {
+          apQueueRef.current.push(apQueueRef.current.shift()!);
+          apLogIt("warn", `Versuch ${job.attempts}/3 für Video #${job.index + 1} (R${job.round}) fehlgeschlagen: ${msg}`);
+          await sleep(5000);
+        }
+        setApQueueDepth(apQueueRef.current.length);
+      } finally {
+        setApPosting(false);
+        apPostingRef.current = false;
+      }
+    }
+  }, [apLogIt, bumpStats, patchItem]);
+
+  /** Status-Poller: offene Posts + Credits aktuell halten. */
+  const runStatusPoller = useCallback(async () => {
+    const runId = apRunIdRef.current;
+    const alive = () => apRunningRef.current && apRunIdRef.current === runId;
+    while (alive()) {
+      await sleep(60000);
+      if (!alive()) break;
+      if (!apConfigRef.current.pollStatus) continue;
+      try {
+        const { posts, refreshed } = await refreshOpenPosts();
+        if (refreshed > 0) {
+          setLakePosts(posts);
+          apLogIt("info", `${refreshed} Post-Status bei Postlake aktualisiert.`);
+        }
+        const st = await fetchStatus();
+        if (alive()) setLakeStatus(st);
+      } catch {
+        /* still, still — nächster Tick */
+      }
+    }
+  }, [apLogIt]);
+
+  const startAutopilot = useCallback(() => {
+    if (apRunningRef.current) return;
+    const readyCount = bgsRef.current.filter((b) => b.status === "ready").length;
+    const footageOk =
+      modeRef.current === "single"
+        ? !!sourceRef.current && clipsRef.current.length === 10
+        : readyCount === 10;
+    if (!footageOk || !recorderSupported()) return;
+    if (phaseRef.current === "preparing" || phaseRef.current === "rendering") return;
+
+    apRunIdRef.current++;
+    apRunningRef.current = true;
+    apRoundRef.current = 0;
+    setApRunning(true);
+    bumpStats(() => ({ startedAt: Date.now(), rounds: 0 }));
+    const cfg = apConfigRef.current;
+    apLogIt(
+      "info",
+      `Autopilot gestartet — Limit ${cfg.videosPerHour}/h, Modus ${cfg.mode === "now" ? "Sofort posten" : "Slots planen"}, Kanäle: ${cfg.platforms.join(", ")}.`
+    );
+    try {
+      const nav = navigator as Navigator & {
+        wakeLock?: { request: (t: string) => Promise<{ release: () => Promise<void> }> };
+      };
+      nav.wakeLock
+        ?.request("screen")
+        .then((lock) => {
+          wakeLockRef.current = lock;
+        })
+        .catch(() => {});
+    } catch {
+      /* optional */
+    }
+    void runAutopilotLoop();
+    void runDispatchWorker();
+    void runStatusPoller();
+  }, [apLogIt, bumpStats, runAutopilotLoop, runDispatchWorker, runStatusPoller]);
+
   /* ------------------------------------------------------------ */
   /*  zip dispatch                                                 */
   /* ------------------------------------------------------------ */
@@ -779,7 +1394,7 @@ export default function App() {
       <Header
         phase={phase}
         keyed={keyed}
-        scheduledCount={scheduledPosts.length}
+        scheduledCount={lakePosts.length}
         onJump={jumpTo}
       />
 
@@ -852,8 +1467,9 @@ export default function App() {
         {/* ---------------- Dashboard header stats ---------------- */}
         <div className="mb-5">
           <DashboardStats
-            posts={bufferPosts}
-            totals={analyticsTotals}
+            posts={lakePosts}
+            credits={lakeStatus.credits?.total ?? null}
+            hourLimit={apConfig.videosPerHour}
             onCreate={() => jumpTo("create")}
           />
         </div>
@@ -880,7 +1496,7 @@ export default function App() {
                   ? "TAP AI ×10 TO LET QWEN / MISTRAL INVENT ALL TEN TITLES — OR ✨ ON A SINGLE ROW."
                   : "NO API KEY YET — AI ×10 USES THE BUILT-IN OFFLINE TITLE BUILDER. ADD A KEY UNDER 00 FOR REAL AI."
               }
-              disabled={busy}
+              disabled={busy || apRunning}
             />
             <ClipMill
               mode={mode}
@@ -905,7 +1521,7 @@ export default function App() {
                 setBgs([]);
                 void clearKind("background");
               }}
-              disabled={busy}
+              disabled={busy || apRunning}
             />
             <MusicPanel
               tracks={tracks}
@@ -921,7 +1537,7 @@ export default function App() {
                 setTracks((prev) => prev.filter((t) => t.id !== id));
                 void deleteAsset(id);
               }}
-              disabled={busy}
+              disabled={busy || apRunning}
             />
             <AssemblyPanel
               phase={phase}
@@ -932,7 +1548,8 @@ export default function App() {
               errorCount={errorCount}
               renderProgress={renderProgress}
               error={error}
-              onPrepare={prepare}
+              disabled={apRunning}
+              onPrepare={() => void prepare()}
               onRenderAll={renderAll}
               onCancel={cancel}
             />
@@ -945,53 +1562,57 @@ export default function App() {
               elapsed={elapsed}
               activeIndex={activeIndex}
               activeProgress={activeProgress}
+              disabled={apRunning}
               onBuildZip={buildZip}
               onRenderOne={renderOne}
-              onPostItems={(targets) => setEditorItems(targets)}
+              onPostItems={(targets) => void postItems(targets)}
             />
           </div>
 
-          {/* ---------------- RIGHT: social, calendar, analytics ---------------- */}
+          {/* ---------------- RIGHT: autopilot, social, calendar, analytics ---------------- */}
           <div className="grid content-start gap-5 xl:max-h-[calc(100vh-7rem)] xl:overflow-y-auto xl:pr-2">
             <div ref={postRef} className="scroll-mt-28">
-              <SocialAccounts
-                channels={channels}
-                posts={bufferPosts}
-                hasApiKey={bufferKey}
-                loading={bufferLoading}
-                error={bufferError}
-                onRefresh={() => void syncBuffer()}
+              <AutopilotPanel
+                config={apConfig}
+                onConfig={setApConfig}
+                running={apRunning}
+                stats={apStats}
+                log={apLog}
+                queueDepth={apQueueDepth}
+                posting={apPosting}
+                canStart={canAutostart}
+                blockers={autopilotBlockers}
+                hasKey={lakeStatus.hasApiKey}
+                credits={lakeStatus.credits?.total ?? null}
+                onStart={startAutopilot}
+                onStop={() => stopAutopilot(false)}
               />
             </div>
 
+            <PostlakeAccounts
+              status={lakeStatus}
+              posts={lakePosts}
+              loading={lakeLoading}
+              prefs={prefs}
+              onPrefs={setPrefs}
+              onRefresh={() => void syncLake()}
+            />
+
             <div ref={calendarRef} className="scroll-mt-28">
-              <BufferCalendar
-                posts={bufferPosts}
-                loading={bufferLoading}
-                onPostsChange={setBufferPosts}
-                onRefresh={() => void syncBuffer()}
+              <PostlakeCalendar
+                posts={lakePosts}
+                timezone={prefs.timezone}
+                loading={lakeLoading}
+                onPostsChange={setLakePosts}
+                onRefresh={() => void syncLake()}
               />
             </div>
 
             <div ref={analyticsRef} className="scroll-mt-28">
-              <AnalyticsPanel onTotals={setAnalyticsTotals} />
+              <PostlakeAnalytics posts={lakePosts} />
             </div>
           </div>
         </div>
-
-        {/* ---------------- Legacy: bisheriges Zernio-Planungssystem ---------------- */}
-        <details className="mt-8 border border-coal-700/70 bg-coal-900/60">
-          <summary className="cursor-pointer px-4 py-3 font-mono text-[10px] font-bold tracking-widest text-coal-300 hover:text-volt-300">
-            ▸ ZERNIO-PLANUNG (BISHERIGES SYSTEM) — {scheduledPosts.length} EINTRÄGE
-          </summary>
-          <div className="border-t border-coal-700/70 p-4">
-            <CalendarView
-              posts={scheduledPosts}
-              hasApiKey={hasZernioKey}
-              onPostsChange={setScheduledPosts}
-            />
-          </div>
-        </details>
 
         <footer className="mt-12 flex flex-wrap items-center justify-between gap-3 border-t border-coal-700/70 pt-5 pb-[env(safe-area-inset-bottom)]">
           <div className="flex flex-wrap items-center gap-4">
@@ -1009,32 +1630,10 @@ export default function App() {
             </span>
           </div>
           <p className="font-mono text-[9.5px] tracking-wider text-coal-500">
-            SHORTSFACTORY v3 · CLIP MILL — NO SERVER · NO FFMPEG · NO MERCY
+            SHORTSFACTORY · CLIP MILL + POSTLAKE AUTOPILOT — NO FFMPEG · NO MERCY
           </p>
         </footer>
       </main>
-
-      {editorItems && (
-        <BufferPostEditor
-          targetItems={editorItems}
-          channels={channels}
-          existingPosts={bufferPosts}
-          hasApiKey={bufferKey}
-          onClose={() => setEditorItems(null)}
-          onCreated={(posts) => setBufferPosts(posts)}
-          onOpenCalendar={() => jumpTo("calendar")}
-        />
-      )}
-
-      {postModalItems && (
-        <PostScheduleModal
-          targetItems={postModalItems}
-          existingPosts={scheduledPosts}
-          onClose={() => setPostModalItems(null)}
-          onScheduled={(allPosts) => setScheduledPosts(allPosts)}
-          onOpenCalendar={() => jumpTo("calendar")}
-        />
-      )}
 
       {busy && (
         <div
