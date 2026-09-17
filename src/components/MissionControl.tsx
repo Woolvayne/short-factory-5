@@ -24,6 +24,7 @@ import Section from "./Section";
 import { cn } from "../utils/cn";
 import type { LocalRenderItem, Phase, RenderStage } from "../lib/types";
 import { STAGES, stageIndex } from "../lib/types";
+import type { PostMode } from "../lib/postlake";
 import { formatBytes, formatClock, formatDuration } from "../lib/media";
 
 export interface ZipState {
@@ -344,6 +345,8 @@ export function OutputPanel({
   activeIndex,
   activeProgress,
   disabled = false,
+  postMode,
+  onPostMode,
   onBuildZip,
   onRenderOne,
   onPostItems,
@@ -356,6 +359,8 @@ export function OutputPanel({
   activeIndex: number | null;
   activeProgress: number;
   disabled?: boolean;
+  postMode: PostMode;
+  onPostMode: (mode: PostMode) => void;
   onBuildZip: () => void;
   onRenderOne: (index: number) => void;
   onPostItems: (targetItems: LocalRenderItem[]) => void;
@@ -589,6 +594,39 @@ export function OutputPanel({
                 <Timer className="size-3.5 text-coal-400" />
                 {formatClock(elapsed)}
               </span>
+            )}
+            {doneCount > 0 && (
+              <div
+                role="group"
+                aria-label="Post-Modus"
+                title="SOFORT: Videos gehen direkt nach dem Klick raus. · PLANEN: belegt automatisch die nächsten freien Slots (Standard 06:00 & 20:00 Berlin)."
+                className="flex divide-x divide-coal-600 border border-coal-600 bg-coal-850"
+              >
+                {(["now", "scheduled"] as PostMode[]).map((m) => {
+                  const active = postMode === m;
+                  return (
+                    <button
+                      key={m}
+                      type="button"
+                      aria-pressed={active}
+                      onClick={() => onPostMode(m)}
+                      className={cn(
+                        "flex min-h-[44px] items-center gap-1.5 px-2.5 font-display text-[11px] font-black tracking-tight uppercase transition-colors sm:px-3",
+                        active
+                          ? "bg-heat text-coal-950"
+                          : "text-coal-400 hover:text-volt-300"
+                      )}
+                    >
+                      {m === "now" ? (
+                        <Zap className="size-3" strokeWidth={2.6} />
+                      ) : (
+                        <Timer className="size-3" strokeWidth={2.4} />
+                      )}
+                      {m === "now" ? "Sofort" : "Planen"}
+                    </button>
+                  );
+                })}
+              </div>
             )}
             {doneCount > 0 && (
               <button

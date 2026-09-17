@@ -1563,6 +1563,8 @@ export default function App() {
               activeIndex={activeIndex}
               activeProgress={activeProgress}
               disabled={apRunning}
+              postMode={prefs.mode}
+              onPostMode={(m) => setPrefs({ ...prefs, mode: m })}
               onBuildZip={buildZip}
               onRenderOne={renderOne}
               onPostItems={(targets) => void postItems(targets)}

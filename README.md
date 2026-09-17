@@ -105,7 +105,13 @@ Ablauf pro Video (exakt nach [docs.postlake.dev](https://docs.postlake.dev)):
 
 1. **Media:** `POST /v1/media/batch` (JSON) liefert eine signierte PUT-URL —
    der Browser lädt die Render-Bytes direkt hoch, der Key bleibt geheim. Ergebnis:
-   eine `med_…`-ID. (Fallback: Supabase-Hosting + serverseitiger Ingest.)
+   eine `med_…`-ID. Binär-Bodies gehen roh durch die Server-Route (kein
+   JSON-Serialize → kein HTTP 413 mehr), signierte PUTs senden exakt die
+   vorgegebenen Header (Content-Type nur ergänzen, wenn nicht schon gesetzt).
+   **Fallback-Kette** (serverseitig, schadet nie): Supabase-Hosting →
+   ① `{url}`-Ingest → ② Bytes laden + serverseitig auf signierte PUT-URL →
+   ③ roher `POST /v1/media` (nur ≤ 8 MB). Fehlermeldungen nennen MB + Diagnose
+   pro Schritt.
 2. **Validate:** `POST /v1/posts/validate` (kostenlos) prüft Caption-, Media- und
    Options-Regeln vorab.
 3. **Create:** `POST /v1/posts` mit `accounts`, `media`, optional `scheduledAt` +
@@ -129,8 +135,10 @@ Autopilot-Panel — bitte vor großen Läufen prüfen.
 
 **Post all:** Der Button in der Output-Bay (und **POST** auf jeder Karte) postet
 **ohne Nachfrage** mit den gespeicherten Voreinstellungen (Kanäle, Modus
-Sofort/Slots, Caption, Hashtags). Fortschritt läuft auf Button & Karten, Fehler
-landen rot im Kalender.
+Sofort/Slots, Caption, Hashtags). Der **SOFORT/PLANEN-Schalter** sitzt als
+kompakte Segment-Steuerung direkt davor (aktiv = volt): SOFORT schickt sofort
+raus, PLANEN belegt automatisch die nächsten freien Slots. Fortschritt läuft
+auf Button & Karten, Fehler landen rot im Kalender.
 
 **Kalender:** Postliste von Postlake (Quelle der Wahrheit) + lokale Spiegel.
 Geplante Posts lassen sich umplanen (PATCH) und stornieren (DELETE);
