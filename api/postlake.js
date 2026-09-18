@@ -32,6 +32,8 @@ export const config = {
   maxDuration: 60,
 };
 
+import { gateBlocked } from "../server/gate-core.js";
+
 const POSTLAKE_BASE_URL = "https://api.postlake.dev/v1";
 const TIMEZONE = "Europe/Berlin";
 

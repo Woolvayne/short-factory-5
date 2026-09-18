@@ -33,6 +33,8 @@ export const config = {
   maxDuration: 60,
 };
 
+import { gateBlocked } from "../server/gate-core.js";
+
 const BUFFER_API_URL = "https://api.buffer.com";
 const TIMEZONE = "Europe/Berlin";
 
@@ -602,6 +604,11 @@ export default async function handler(req, res) {
     console.error("Buffer API route error:", e);
     return res.status(500).json({
       ok: false,
+      error: e instanceof Error ? e.message : String(e),
+    });
+  }
+}
+ false,
       error: e instanceof Error ? e.message : String(e),
     });
   }
