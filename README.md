@@ -58,6 +58,32 @@ copyright. The panel shows the legal one-step alternative:
 No API keys? The built-in **offline story writer** takes over — full-length
 first-person stories with zero network.
 
+## Passwortschutz (optional — APP_PASSWORD)
+
+Die App lässt sich optional mit einem Zugangs-Passwort absichern. Das Passwort
+lebt **ausschließlich serverseitig** als Umgebungsvariable — es taucht nie im
+Client-Bundle auf und wird serverseitig (timing-sicher) geprüft:
+
+```bash
+# Vercel → Project Settings → Environment Variables
+APP_PASSWORD=dein_sicheres_passwort
+GATE_TTL_HOURS=168   # optional: Session-Dauer in Stunden (Default = 7 Tage)
+```
+
+| Zustand | Verhalten |
+| --- | --- |
+| **Variable gesetzt** | Beim App-Start erscheint ein Lock-Screen. Erst nach dem Passwort werden die Factory (**UI und alle `/api`-Routen**: tts, postlake, buffer, gate) freigeschaltet. Die signierte HttpOnly-Session-Cookie hält standardmäßig **7 Tage** — kein Neu-Fragen bei jedem Reload. Passwort ändern in Vercel → alle Sessions sofort ungültig. |
+| **Variable leer / fehlt** | Es wird **nicht** nach einem Passwort gefragt — die App läuft unverändert offen. Statt dem Prompt zeigt sie nur einen dezenten **Verweis** auf die Variable: Banner unter dem Hero (mit Link zur Vercel-Doku), `ACCESS GATE`-Zeile im Hero-Panel und `GATE OFF` im Footer. |
+
+Technik: `api/gate.js` (`GET` Status · `POST` entsperren · `DELETE` sperren)
+vergleicht das Passwort serverseitig über SHA-256-Digests mit
+`timingSafeEqual` und bremst Fehlversuche pro IP ab. Bei Erfolg setzt es ein
+HMAC-signiertes Cookie (Secret = aus dem Passwort abgeleitet) — dieselbe
+Session schaltet dann auch `/api/tts`, `/api/postlake` und `/api/buffer` frei
+(`server/gate-core.js`). Client-Seite: `src/lib/gate.ts` +
+`src/components/GatePanel.tsx`. Lokal ist das Gate in den `npm run dev`-Server
+eingebaut — einfach `APP_PASSWORD` in eine `.env` schreiben.
+
 ## One-Page Dashboard (Buffer + Postlake)
 
 Alles liegt auf **einer** Seite. Auf Desktop/iPad läuft ein Split-Screen:
@@ -313,7 +339,8 @@ src/
    ├─ autopilot.ts  auto-mode config (provider!), hourly throttle, dispatch log, stats
    └─ upload.ts     signed-PUT uploads to Postlake · supabase hosting for Buffer
 
-api/        ← tts relay + postlake route + buffer route (Vercel Serverless, Node.js runtime)
+api/        ← tts relay + postlake route + buffer route + gate (Vercel Serverless, Node.js runtime)
+server/     ← gate-core.js: geteilte Gate-Logik (Password-Check, HMAC-Session, 401-Guard)
 supabase/   ← inert legacy v1 (hosted Edge Functions + Shotstack), unused
             (nur der „renders"-Bucket lebt: Postlake-Fallback + Buffer-Pflicht-Hosting)
 ```

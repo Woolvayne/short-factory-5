@@ -309,6 +309,9 @@ export default async function handler(req, res) {
     return res.status(405).json({ ok: false, error: "POST only" });
   }
 
+  // APP_PASSWORD gesetzt & Session ungültig? → 401 (Gate-Schutz, siehe server/gate-core.js)
+  if (gateBlocked(req, res)) return;
+
   try {
     const body =
       typeof req.body === "string" ? JSON.parse(req.body || "{}") : (req.body ?? {});

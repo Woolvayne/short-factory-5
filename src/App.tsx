@@ -7,12 +7,14 @@ import {
   Cpu,
   FileArchive,
   HardDrive,
+  Lock,
   Mic,
   Radio,
   ShieldCheck,
   Wifi,
 } from "lucide-react";
 import Header from "./components/Header";
+import GatePanel, { GateBanner, GateBoot, useGate } from "./components/GatePanel";
 import PostlakeAccounts, { DashboardStats } from "./components/PostlakeAccounts";
 import BufferAccounts from "./components/BufferAccounts";
 import PostlakeCalendar from "./components/PostlakeCalendar";
@@ -149,6 +151,9 @@ type AnyAudioContext = typeof AudioContext;
 export default function App() {
   const [settings, setSettings] = useState<Settings>(() => loadSettings());
   const [ideas, setIdeas] = useState<string[]>(INITIAL_IDEAS);
+
+  /* Zugangsschutz: fragt nur nach Passwort, wenn APP_PASSWORD in Vercel gesetzt ist */
+  const gate = useGate();
 
   /* clip mill */
   const [mode, setMode] = useState<SourceMode>("single");
@@ -329,8 +334,11 @@ export default function App() {
   }, []);
 
   useEffect(() => {
+    /* Erst wenn das Gate offen ist (entsperrt oder ohne APP_PASSWORD) —
+       sonst laufen die Social-Calls gegen 401. */
+    if (!gate.open) return;
     void syncSocial();
-  }, [syncSocial]);
+  }, [gate.open, syncSocial]);
 
   /* Autopilot-Worker beim Unmount garantiert beenden */
   useEffect(() => {
@@ -1597,6 +1605,14 @@ export default function App() {
   const renderProgress = (doneCount + errorCount + activeProgress) / 10;
 
   /* ------------------------------------------------------------ */
+  /*  Zugangsschutz                                                */
+  /*                                                               */
+  /*  Ohne APP_PASSWORD in Vercel: Gate offen, App startet direkt.  */
+  /*  Mit APP_PASSWORD: erst Lock-Screen, dann die Factory.         */
+  /* ------------------------------------------------------------ */
+
+  if (gate.checking) return <GateBoot />;
+  if (gate.locked) return <GatePanel onUnlocked={gate.unlock} />;
 
   return (
     <div className="grain relative min-h-dvh bg-coal-950">
@@ -1654,6 +1670,15 @@ export default function App() {
                   ? `${readyBgs.length} CLIPS · ${tracks.length} TRACKS GESPEICHERT`
                   : "LADE LOKALEN SPEICHER…",
               },
+              {
+                icon: Lock,
+                k: "ACCESS GATE",
+                v: gate.checking
+                  ? "PRÜFE …"
+                  : gate.enabled
+                    ? "AKTIV · PASSWORT-GESCHÜTZT"
+                    : "OFFEN — KEIN APP_PASSWORD GESETZT",
+              },
             ].map(({ icon: Icon, k, v }) => (
               <div
                 key={k}
@@ -1678,6 +1703,9 @@ export default function App() {
             TUNE 00 · IDEAS 01 · FOOTAGE 02 · MUSIC 03 — THEN PREPARE AND PRESS RENDER
           </span>
         </div>
+
+        {/* Zugangsschutz: Verweis (ohne Variable) bzw. Status + SPERREN (mit Variable) */}
+        <GateBanner enabled={gate.enabled} checking={gate.checking} onLocked={gate.lock} />
 
         {/* ---------------- Dashboard header stats ---------------- */}
         <div className="mb-5">
@@ -1872,6 +1900,10 @@ export default function App() {
             </span>
             <span className="hidden items-center gap-1.5 font-mono text-[9.5px] tracking-wider text-coal-400 sm:flex">
               <ShieldCheck className="size-3.5 text-coal-500" /> KEYS IN LOCALSTORAGE ONLY
+            </span>
+            <span className="flex items-center gap-1.5 font-mono text-[9.5px] tracking-wider text-coal-400">
+              <Lock className="size-3.5 text-coal-500" /> GATE{" "}
+              {gate.enabled ? "ON" : "OFF — SETZE APP_PASSWORD IN VERCEL"}
             </span>
           </div>
           <p className="font-mono text-[9.5px] tracking-wider text-coal-500">
