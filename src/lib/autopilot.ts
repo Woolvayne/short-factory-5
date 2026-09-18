@@ -13,18 +13,23 @@
  */
 
 import type { SocialPlatform } from "./postlake";
+import type { DispatchProvider } from "./dispatch";
 
 export type AutopilotMode = "now" | "scheduled";
 
 export interface AutopilotConfig {
-  /** Stunden-Limit: 1–100 Videos/Stunde an Postlake (voreingestellt: 10) */
+  /** Versandweg im Auto-Modus: Postlake oder Buffer (kein Nachfragen) */
+  provider: DispatchProvider;
+  /** Stunden-Limit: 1–100 Videos/Stunde an den Versandweg (voreingestellt: 10) */
   videosPerHour: number;
-  /** "now" = sofort veröffentlichen (publishNow) · "scheduled" = freie Slots (06:00/20:00) */
+  /** "now" = sofort veröffentlichen · "scheduled" = freie Slots (06:00/20:00) */
   mode: AutopilotMode;
   /** Plattform-Rotation für den Versand */
   platforms: SocialPlatform[];
   /** Optional: feste Postlake-Account-IDs je Plattform (sonst erster verbundener Kanal) */
   accountIds: Partial<Record<SocialPlatform, string>>;
+  /** Optional: feste Buffer-Kanal-IDs je Plattform (sonst erster verbundener Kanal) */
+  bufferAccountIds: Partial<Record<SocialPlatform, string>>;
   /** Caption-Vorlage; {title} wird durch die Story-Idee ersetzt */
   caption: string;
   hashtags: string;
@@ -38,10 +43,12 @@ export const AUTOPILOT_MIN_PER_HOUR = 1;
 export const AUTOPILOT_MAX_PER_HOUR = 100;
 
 export const AUTOPILOT_DEFAULTS: AutopilotConfig = {
+  provider: "postlake",
   videosPerHour: 10,
   mode: "now",
   platforms: ["tiktok", "instagram", "youtube"],
   accountIds: {},
+  bufferAccountIds: {},
   caption:
     "You won't believe how this story ends...\nStay until the end because the plot twist is INSANE.\nWould you have done the same?",
   hashtags: "#reddit #redditstories #storytime #stories #fyp",
@@ -66,6 +73,7 @@ export function loadAutopilotConfig(): AutopilotConfig {
     return {
       ...AUTOPILOT_DEFAULTS,
       ...parsed,
+      provider: parsed.provider === "buffer" ? "buffer" : "postlake",
       videosPerHour: clampPerHour(Number(parsed.videosPerHour)),
       platforms:
         Array.isArray(parsed.platforms) && parsed.platforms.length > 0
@@ -74,6 +82,7 @@ export function loadAutopilotConfig(): AutopilotConfig {
             )
           : [...AUTOPILOT_DEFAULTS.platforms],
       accountIds: parsed.accountIds || {},
+      bufferAccountIds: parsed.bufferAccountIds || {},
     };
   } catch {
     return { ...AUTOPILOT_DEFAULTS, platforms: [...AUTOPILOT_DEFAULTS.platforms] };

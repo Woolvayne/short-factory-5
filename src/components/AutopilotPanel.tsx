@@ -24,6 +24,7 @@ import {
   type AutopilotLogEntry,
   type AutopilotStats,
 } from "../lib/autopilot";
+import { PROVIDER_META } from "../lib/dispatch";
 import type { SocialPlatform } from "../lib/postlake";
 
 const PLATFORM_META: Record<SocialPlatform, { label: string; short: string }> = {
@@ -46,6 +47,8 @@ export default function AutopilotPanel({
   blockers,
   hasKey,
   credits,
+  bufferHasKey,
+  bufferChannels,
   onStart,
   onStop,
 }: {
@@ -60,6 +63,8 @@ export default function AutopilotPanel({
   blockers: string[];
   hasKey: boolean;
   credits: number | null;
+  bufferHasKey: boolean;
+  bufferChannels: number;
   onStart: () => void;
   onStop: () => void;
 }) {
@@ -98,7 +103,8 @@ export default function AutopilotPanel({
               Autopilot · Auto-Modus
             </h2>
             <p className="font-mono text-[10px] text-coal-300">
-              Rendern + Posten über Postlake — vollautomatisch, ohne Klick
+              Rendern + Posten über {PROVIDER_META[config.provider].label} — vollautomatisch,
+              ohne Klick
             </p>
           </div>
         </div>
@@ -119,18 +125,27 @@ export default function AutopilotPanel({
             />
             {running ? "LÄUFT" : "BEREIT"}
           </span>
-          <span
-            className={cn(
-              "flex items-center gap-1.5 border px-3 py-1.5 font-mono text-[10px] font-bold tracking-wider",
-              credits !== null && credits <= 10
-                ? "border-rose-err/60 bg-rose-err/10 text-rose-err"
-                : "border-coal-600 bg-coal-850 text-coal-300"
-            )}
-            title="1 Credit pro veröffentlichtem Kanal-Post"
-          >
-            <Coins className="size-3.5" />
-            {credits !== null ? `${credits} CREDITS` : "CREDITS –"}
-          </span>
+          {config.provider === "postlake" ? (
+            <span
+              className={cn(
+                "flex items-center gap-1.5 border px-3 py-1.5 font-mono text-[10px] font-bold tracking-wider",
+                credits !== null && credits <= 10
+                  ? "border-rose-err/60 bg-rose-err/10 text-rose-err"
+                  : "border-coal-600 bg-coal-850 text-coal-300"
+              )}
+              title="1 Credit pro veröffentlichtem Kanal-Post"
+            >
+              <Coins className="size-3.5" />
+              {credits !== null ? `${credits} CREDITS` : "CREDITS –"}
+            </span>
+          ) : (
+            <span
+              className="flex items-center gap-1.5 border border-coal-600 bg-coal-850 px-3 py-1.5 font-mono text-[10px] font-bold tracking-wider text-coal-300"
+              title="Verbundene Buffer-Kanäle"
+            >
+              📦 {bufferChannels} KANÄLE
+            </span>
+          )}
         </div>
       </div>
 
@@ -204,7 +219,7 @@ export default function AutopilotPanel({
           )}
           <span className="font-mono text-[10px] text-coal-300">
             {posting ? (
-              <>Sende Video an Postlake …</>
+              <>Sende Video an {PROVIDER_META[config.provider].label} …</>
             ) : queueDepth > 0 ? (
               <>
                 Nächster Versand in <strong className="text-volt-300">{formatWait(waitMs)}</strong>{" "}
@@ -217,10 +232,51 @@ export default function AutopilotPanel({
         </div>
       )}
 
+      {/* provider */}
+      <div className="mt-4">
+        <label className="mono-label mb-1.5 block text-[9px] text-coal-400">
+          SENDE-DIENST (AUTO-MODUS)
+        </label>
+        <div className="grid grid-cols-2 gap-2">
+          {(["postlake", "buffer"] as const).map((pp) => {
+            const active = config.provider === pp;
+            return (
+              <button
+                key={pp}
+                type="button"
+                onClick={() => onConfig({ ...config, provider: pp })}
+                className={cn(
+                  "flex items-center justify-center gap-2 border px-3 py-2.5 transition-colors",
+                  active
+                    ? "border-volt-400 bg-volt-400/15"
+                    : "border-coal-700 bg-coal-850 hover:border-coal-500"
+                )}
+              >
+                <span className="text-base">{PROVIDER_META[pp].icon}</span>
+                <span
+                  className={cn(
+                    "font-display text-[12px] font-black tracking-wide uppercase",
+                    active ? "text-paper-100" : "text-coal-400"
+                  )}
+                >
+                  {PROVIDER_META[pp].label}
+                </span>
+                {active && <Check className="size-3.5 text-volt-300" strokeWidth={3} />}
+              </button>
+            );
+          })}
+        </div>
+        <p className="mt-1.5 font-mono text-[9px] leading-relaxed text-coal-500">
+          {config.provider === "buffer"
+            ? "Buffer: 1 Mutation pro Kanal, Videos laufen vorab ins Supabase-Hosting (öffentliche URL)."
+            : "Postlake: 1 Call fächert auf alle Kanäle auf, Upload per signierter PUT-URL."}
+        </p>
+      </div>
+
       {/* limit */}
       <div className="mt-4">
         <label className="mono-label mb-1.5 flex items-center gap-1.5 text-[9px] text-coal-400">
-          <Gauge className="size-3.5" /> VIDEOS PRO STUNDE AN POSTLAKE · LIMIT (1–100)
+          <Gauge className="size-3.5" /> VIDEOS PRO STUNDE AN {PROVIDER_META[config.provider].short} · LIMIT (1–100)
         </label>
         <div className="flex items-center gap-3">
           <input
@@ -259,8 +315,9 @@ export default function AutopilotPanel({
           ))}
         </div>
         <p className="mt-1.5 font-mono text-[9px] leading-relaxed text-coal-500">
-          Das Limit drosselt den Postlake-Versand — gerendert wird durchgehend, der Rest wartet in
-          der Queue. Beachte zusätzlich die Tages-Limits der Plattformen (z. B. TikTok).
+          Das Limit drosselt den {PROVIDER_META[config.provider].label}-Versand — gerendert wird
+          durchgehend, der Rest wartet in der Queue. Beachte zusätzlich die Tages-Limits der
+          Plattformen (z. B. TikTok) und bei Buffer die Queue-Limits des Plans.
         </p>
       </div>
 
@@ -285,7 +342,7 @@ export default function AutopilotPanel({
               <span className="block font-display text-[11px] font-bold text-paper-100">
                 Sofort posten
               </span>
-              <span className="block font-mono text-[8.5px] text-coal-400">publishNow · live</span>
+              <span className="block font-mono text-[8.5px] text-coal-400">sofort · live</span>
             </span>
           </button>
           <button
@@ -395,12 +452,23 @@ export default function AutopilotPanel({
         </label>
       </div>
 
-      {!hasKey && (
+      {config.provider === "postlake" && !hasKey && (
         <div className="mt-4 flex items-start gap-2 border border-amber-warn/40 bg-amber-warn/10 px-3 py-2.5">
           <TriangleAlert className="mt-0.5 size-4 shrink-0 text-amber-warn" />
           <p className="font-mono text-[10px] leading-relaxed text-amber-warn">
             Kein POSTLAKE_API_KEY auf dem Server — der Autopilot rendert trotzdem, Posts werden
             lokal zwischengespeichert und gehen live, sobald der Key gesetzt ist.
+          </p>
+        </div>
+      )}
+
+      {config.provider === "buffer" && !bufferHasKey && (
+        <div className="mt-4 flex items-start gap-2 border border-amber-warn/40 bg-amber-warn/10 px-3 py-2.5">
+          <TriangleAlert className="mt-0.5 size-4 shrink-0 text-amber-warn" />
+          <p className="font-mono text-[10px] leading-relaxed text-amber-warn">
+            Kein BUFFER_API_KEY auf dem Server — der Autopilot rendert trotzdem, Posts werden
+            lokal zwischengespeichert und gehen live, sobald der Key gesetzt ist. Für Buffer
+            braucht es zusätzlich Supabase-Hosting (VITE_SUPABASE_*).
           </p>
         </div>
       )}

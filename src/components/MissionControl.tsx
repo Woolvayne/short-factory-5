@@ -21,10 +21,12 @@ import {
   Zap,
 } from "lucide-react";
 import Section from "./Section";
+import DispatchChooser, { type ProviderReadiness } from "./DispatchChooser";
 import { cn } from "../utils/cn";
 import type { LocalRenderItem, Phase, RenderStage } from "../lib/types";
 import { STAGES, stageIndex } from "../lib/types";
 import type { PostMode } from "../lib/postlake";
+import type { DispatchProvider } from "../lib/dispatch";
 import { formatBytes, formatClock, formatDuration } from "../lib/media";
 
 export interface ZipState {
@@ -350,6 +352,9 @@ export function OutputPanel({
   onBuildZip,
   onRenderOne,
   onPostItems,
+  dispatchDefault,
+  postlakeReady,
+  bufferReady,
 }: {
   phase: Phase;
   items: LocalRenderItem[];
@@ -363,13 +368,22 @@ export function OutputPanel({
   onPostMode: (mode: PostMode) => void;
   onBuildZip: () => void;
   onRenderOne: (index: number) => void;
-  onPostItems: (targetItems: LocalRenderItem[]) => void;
+  onPostItems: (targetItems: LocalRenderItem[], via: DispatchProvider) => void;
+  dispatchDefault: DispatchProvider;
+  postlakeReady: ProviderReadiness;
+  bufferReady: ProviderReadiness;
 }) {
   const [preview, setPreview] = useState<LocalRenderItem | null>(null);
+  const [chooserTargets, setChooserTargets] = useState<LocalRenderItem[] | null>(null);
   const doneCount = items.filter((r) => r.status === "done").length;
   const postingCount = items.filter((r) => r.posting).length;
   const postedCount = items.filter((r) => r.posted).length;
   const busy = phase === "preparing" || phase === "rendering";
+
+  const askProvider = (targets: LocalRenderItem[]) => {
+    if (targets.length === 0 || postingCount > 0) return;
+    setChooserTargets(targets);
+  };
 
   const cells = useMemo<(LocalRenderItem | null)[]>(() => {
     if (items.length > 0) return items;
@@ -527,12 +541,14 @@ export function OutputPanel({
                       ) : item.posted ? (
                         <div className="flex min-h-[34px] w-full items-center justify-center gap-1.5 border border-volt-400/60 bg-volt-400/10 px-2 py-1.5 font-mono text-[9.5px] font-bold tracking-widest text-volt-300">
                           <Check className="size-3" strokeWidth={2.5} /> GEPOSTET
+                          {item.postedVia ? ` · ${item.postedVia === "buffer" ? "BUFFER" : "POSTLAKE"}` : ""}
                         </div>
                       ) : (
                         <button
                           type="button"
-                          onClick={() => onPostItems([item])}
+                          onClick={() => askProvider([item])}
                           disabled={postingCount > 0}
+                          title="Versandweg wählen: Buffer oder Postlake"
                           className="bg-heat flex min-h-[34px] w-full items-center justify-center gap-1.5 border border-volt-400 px-2 py-1.5 font-mono text-[9.5px] font-bold tracking-widest text-coal-950 transition-opacity hover:opacity-90 disabled:cursor-wait disabled:opacity-40"
                         >
                           <Send className="size-3" strokeWidth={2.5} />{" "}
@@ -631,9 +647,9 @@ export function OutputPanel({
             {doneCount > 0 && (
               <button
                 type="button"
-                onClick={() => onPostItems(items.filter((i) => i.status === "done"))}
+                onClick={() => askProvider(items.filter((i) => i.status === "done"))}
                 disabled={postingCount > 0}
-                title="Alle fertigen Videos direkt über Postlake posten"
+                title="Versandweg wählen: Buffer oder Postlake"
                 className="bg-heat flex min-h-[44px] items-center gap-2 border border-volt-400 px-4 py-2.5 font-display text-sm font-black tracking-tight text-coal-950 uppercase transition-opacity hover:opacity-90 disabled:opacity-60"
               >
                 {postingCount > 0 ? (
@@ -716,6 +732,21 @@ export function OutputPanel({
       )}
 
       {preview && <VideoModal item={preview} onClose={() => setPreview(null)} />}
+
+      <DispatchChooser
+        open={chooserTargets !== null}
+        title={chooserTargets && chooserTargets.length > 1 ? `Post all · ${chooserTargets.length} Videos` : "Video posten"}
+        subtitle={`${postMode === "now" ? "SOFORT" : "SLOTS PLANEN"} · WÄHLE DEN VERSANDWEG`}
+        postlake={postlakeReady}
+        buffer={bufferReady}
+        defaultProvider={dispatchDefault}
+        onPick={(via) => {
+          const targets = chooserTargets || [];
+          setChooserTargets(null);
+          if (targets.length > 0) onPostItems(targets, via);
+        }}
+        onClose={() => setChooserTargets(null)}
+      />
     </Section>
   );
 }

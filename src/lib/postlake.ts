@@ -63,6 +63,12 @@ export interface LakePost {
   updatedAt: string;
   /** true = existiert nur lokal (kein Key / offline erstellt) */
   local?: boolean;
+  /** Versandweg: Postlake (Standard) oder Buffer (1 Video = N Kanal-Mutationen) */
+  provider?: "postlake" | "buffer";
+  /** Buffer-Post-IDs (eine pro Kanal) — nur bei provider „buffer" */
+  bufferPostIds?: string[];
+  /** Öffentliche Video-URL (Buffer-Hosting via Supabase) — nur bei „buffer" */
+  videoUrl?: string;
 }
 
 export interface LakeAccount {
@@ -192,6 +198,8 @@ export interface PostlakePrefs {
   platforms: SocialPlatform[];
   /** Wunsch-Account je Plattform (acc_…); leer = erster verbundener */
   accountIds: Partial<Record<SocialPlatform, string>>;
+  /** Wunsch-Kanal je Plattform für Buffer (channelId); leer = erster verbundener */
+  bufferAccountIds: Partial<Record<SocialPlatform, string>>;
   mode: PostMode;
   preferredTimes: string[];
   caption: string;
@@ -202,6 +210,7 @@ export interface PostlakePrefs {
 export const DEFAULT_PREFS: PostlakePrefs = {
   platforms: ["tiktok", "instagram", "youtube"],
   accountIds: {},
+  bufferAccountIds: {},
   mode: "now",
   preferredTimes: ["06:00", "20:00"],
   caption:
@@ -223,6 +232,7 @@ export function loadPrefs(): PostlakePrefs {
       ...parsed,
       platforms: platforms.length > 0 ? platforms : [...DEFAULT_PREFS.platforms],
       accountIds: parsed.accountIds || {},
+      bufferAccountIds: parsed.bufferAccountIds || {},
       preferredTimes:
         Array.isArray(parsed.preferredTimes) && parsed.preferredTimes.length > 0
           ? parsed.preferredTimes
@@ -506,6 +516,7 @@ export function makeLocalPost(job: CreateJob, nowIso = new Date().toISOString())
     createdAt: nowIso,
     updatedAt: nowIso,
     local: true,
+    provider: "postlake",
   };
 };
 
@@ -666,6 +677,7 @@ export async function syncPostsFromLake(opts?: {
         createdAt: (r.createdAt as string) || prev?.createdAt || nowIso,
         updatedAt: nowIso,
         local: false,
+        provider: "postlake",
       } as LakePost;
     });
     // Lokal-nur-Einträge (ohne postlakeId) bleiben erhalten

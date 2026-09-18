@@ -1,7 +1,6 @@
 import { useMemo } from "react";
 import {
   Check,
-  Coins,
   ExternalLink,
   Link2,
   Loader2,
@@ -13,102 +12,17 @@ import {
 } from "lucide-react";
 import { cn } from "../utils/cn";
 import {
-  POSTLAKE_DASHBOARD,
-  countPostsLastHour,
+  BUFFER_API_SETTINGS,
+  BUFFER_DASHBOARD,
+  type BufferStatus,
+} from "../lib/buffer";
+import {
   serviceMeta,
   type LakeAccount,
   type LakePost,
   type PostlakePrefs,
-  type PostlakeStatus,
   type SocialPlatform,
 } from "../lib/postlake";
-
-/* ------------------------------------------------------------------ */
-/*  Dashboard-Kopfzeile                                                 */
-/* ------------------------------------------------------------------ */
-
-export function DashboardStats({
-  posts,
-  credits,
-  hourLimit,
-  onCreate,
-}: {
-  posts: LakePost[];
-  credits: number | null;
-  hourLimit: number;
-  onCreate: () => void;
-}) {
-  const stats = useMemo(() => {
-    const todayKey = new Date().toDateString();
-    let today = 0;
-    let planned = 0;
-    let published = 0;
-    let failed = 0;
-    for (const p of posts) {
-      if (new Date(p.scheduledAt).toDateString() === todayKey) today++;
-      if (p.status === "Geplant" || p.status === "Wird veröffentlicht" || p.status === "Entwurf") planned++;
-      if (p.status === "Veröffentlicht" || p.status === "Teils veröffentlicht") published++;
-      if (p.status === "Fehler") failed++;
-    }
-    return { today, planned, published, failed, hour: countPostsLastHour(posts) };
-  }, [posts]);
-
-  const cards = [
-    { label: "HEUTE", value: String(stats.today), sub: "Posts", tone: "text-paper-100" },
-    { label: "GEPLANT", value: String(stats.planned), sub: "in Queue", tone: "text-amber-warn" },
-    { label: "VERÖFFENTLICHT", value: String(stats.published), sub: "gesamt", tone: "text-mint-400" },
-    {
-      label: "DIESE STUNDE",
-      value: `${stats.hour}/${hourLimit}`,
-      sub: "Auto-Limit",
-      tone: "text-volt-300",
-    },
-    {
-      label: "CREDITS",
-      value: credits !== null ? String(credits) : "–",
-      sub: "Postlake-Guthaben",
-      tone: credits !== null && credits <= 10 ? "text-rose-err" : "text-volt-300",
-    },
-  ];
-
-  return (
-    <div className="card-bracket border border-coal-600 bg-coal-900/90 p-4 sm:p-5">
-      <div className="flex flex-wrap items-center justify-between gap-3">
-        <div>
-          <h2 className="font-display text-base font-black tracking-tight text-paper-100 uppercase">
-            Short Factory Dashboard
-          </h2>
-          <p className="font-mono text-[10px] text-coal-300">
-            Video-Produktion, Planung (Buffer/Postlake) und Performance auf einen Blick
-          </p>
-        </div>
-        <button
-          type="button"
-          onClick={onCreate}
-          className="bg-heat flex min-h-[40px] items-center gap-2 border border-volt-400 px-4 py-2 font-display text-xs font-black tracking-wider text-coal-950 uppercase transition-opacity hover:opacity-90"
-        >
-          🎬 Video erstellen
-        </button>
-      </div>
-
-      <div className="mt-4 grid grid-cols-2 gap-2 sm:grid-cols-3 lg:grid-cols-5">
-        {cards.map((c) => (
-          <div key={c.label} className="border border-coal-700/80 bg-coal-850/80 p-3">
-            <span className="mono-label block text-[8.5px] text-coal-400">{c.label}</span>
-            <span className={cn("mt-1 block font-display text-xl font-black", c.tone)}>
-              {c.value}
-            </span>
-            <span className="font-mono text-[9px] text-coal-400">{c.sub}</span>
-          </div>
-        ))}
-      </div>
-    </div>
-  );
-}
-
-/* ------------------------------------------------------------------ */
-/*  Kanäle + Credits + Posting-Voreinstellungen                         */
-/* ------------------------------------------------------------------ */
 
 const PLATFORM_LABEL: Record<SocialPlatform, string> = {
   tiktok: "TikTok",
@@ -116,7 +30,7 @@ const PLATFORM_LABEL: Record<SocialPlatform, string> = {
   youtube: "YouTube",
 };
 
-export default function PostlakeAccounts({
+export default function BufferAccounts({
   status,
   posts,
   loading,
@@ -124,7 +38,7 @@ export default function PostlakeAccounts({
   onPrefs,
   onRefresh,
 }: {
-  status: PostlakeStatus;
+  status: BufferStatus;
   posts: LakePost[];
   loading: boolean;
   prefs: PostlakePrefs;
@@ -134,6 +48,7 @@ export default function PostlakeAccounts({
   const plannedByAccount = useMemo(() => {
     const map: Record<string, number> = {};
     for (const p of posts) {
+      if (p.provider !== "buffer") continue;
       if (p.status === "Geplant" || p.status === "Wird veröffentlicht") {
         for (const a of p.accounts) map[a] = (map[a] || 0) + 1;
       }
@@ -157,24 +72,19 @@ export default function PostlakeAccounts({
         <div className="flex items-center gap-2.5">
           <Users className="size-4 text-volt-400" />
           <h3 className="font-display text-sm font-black tracking-wide text-paper-100 uppercase">
-            🌊 Postlake Kanäle
+            📦 Buffer Kanäle
           </h3>
           <span className="font-mono text-[9.5px] text-coal-400">
             {status.accounts.length} verbunden
           </span>
         </div>
         <div className="flex items-center gap-2">
-          {status.credits && (
+          {status.organizations.length > 0 && (
             <span
-              className={cn(
-                "flex items-center gap-1.5 border px-2.5 py-1 font-mono text-[10px] font-bold",
-                (status.credits.total ?? 0) <= 10
-                  ? "border-rose-err/60 bg-rose-err/10 text-rose-err"
-                  : "border-coal-600 bg-coal-850 text-coal-200"
-              )}
-              title="1 Credit pro veröffentlichtem Kanal-Post"
+              className="hidden border border-coal-600 bg-coal-850 px-2.5 py-1 font-mono text-[10px] text-coal-200 sm:block"
+              title="Buffer-Workspace"
             >
-              <Coins className="size-3" /> {status.credits.total ?? "–"}
+              {status.organizations[0].name}
             </span>
           )}
           <button
@@ -193,14 +103,14 @@ export default function PostlakeAccounts({
         <div className="mt-3 flex items-start gap-2 border border-amber-warn/40 bg-amber-warn/10 px-3 py-2.5">
           <Link2 className="mt-0.5 size-4 shrink-0 text-amber-warn" />
           <p className="font-mono text-[10px] leading-relaxed text-coal-200">
-            <strong className="text-amber-warn">POSTLAKE_API_KEY fehlt.</strong> Key unter{" "}
+            <strong className="text-amber-warn">BUFFER_API_KEY fehlt.</strong> Key unter{" "}
             <a
-              href={POSTLAKE_DASHBOARD}
+              href={BUFFER_API_SETTINGS}
               target="_blank"
               rel="noreferrer"
               className="underline hover:text-amber-warn"
             >
-              app.postlake.dev → API Keys
+              publish.buffer.com → Settings → API
             </a>{" "}
             erzeugen und als Umgebungsvariable in Vercel setzen. Bis dahin läuft alles lokal
             weiter.
@@ -212,8 +122,8 @@ export default function PostlakeAccounts({
         <div className="mt-3 flex items-start gap-2 border border-rose-err/50 bg-rose-err/10 px-3 py-2.5">
           <TriangleAlert className="mt-0.5 size-4 shrink-0 text-rose-err" />
           <p className="font-mono text-[10px] leading-relaxed text-rose-err">
-            Postlake lehnt den Key ab: {status.keyError || "ungültig"}. Neuen Key erzeugen und
-            als POSTLAKE_API_KEY setzen.
+            Buffer lehnt den Key ab: {status.keyError || "ungültig"}. Neuen Key erzeugen und
+            als BUFFER_API_KEY setzen.
           </p>
         </div>
       )}
@@ -221,7 +131,7 @@ export default function PostlakeAccounts({
       {status.hasApiKey && status.apiStatus === "unreachable" && (
         <div className="mt-3 border border-amber-warn/40 bg-amber-warn/10 px-3 py-2">
           <p className="font-mono text-[10px] text-amber-warn">
-            Postlake gerade nicht erreichbar — lokale Ansicht, Sync später erneut versuchen.
+            Buffer gerade nicht erreichbar — lokale Ansicht, Sync später erneut versuchen.
           </p>
         </div>
       )}
@@ -276,10 +186,10 @@ export default function PostlakeAccounts({
         {status.accounts.length === 0 && (
           <div className="border border-dashed border-coal-700 bg-coal-850/40 p-4 sm:col-span-2 xl:col-span-3">
             <p className="text-center font-mono text-[10px] leading-relaxed text-coal-400">
-              Noch keine Kanäle verbunden. Kanäle werden in Postlake verbunden — danach hier auf
+              Noch keine Kanäle verbunden. Kanäle werden in Buffer verbunden — danach hier auf
               SYNC tippen.{" "}
               <a
-                href={POSTLAKE_DASHBOARD}
+                href={BUFFER_DASHBOARD}
                 target="_blank"
                 rel="noreferrer"
                 className="inline-flex items-center gap-1 text-volt-300 underline hover:text-volt-400"
@@ -288,17 +198,17 @@ export default function PostlakeAccounts({
               </a>
             </p>
             <p className="mt-2 text-center font-mono text-[9px] leading-relaxed text-coal-500">
-              Hinweis: TikTok, YouTube, Bluesky u. a. sind sofort verbindbar. Instagram/Facebook
-              sind bei Postlake teils noch im Partner-Review — Details in Postlake.
+              Hinweis: Free-Plan = 3 Kanäle, 10 geplante Posts pro Kanal. Videos brauchen
+              öffentliches Hosting — die App nutzt dafür automatisch den Supabase-Bucket.
             </p>
           </div>
         )}
       </div>
 
-      {/* Posting-Voreinstellungen für „Post all" */}
+      {/* Posting-Voreinstellungen (geteilt mit Postlake, nur Kanal-Mapping ist Buffer-eigen) */}
       <div className="mt-4 border-t border-coal-700/70 pt-4">
         <span className="mono-label mb-2 block text-[9px] text-coal-400">
-          POST ALL · VOREINSTELLUNGEN (GETEILT MIT BUFFER)
+          POST ALL · VOREINSTELLUNGEN (GETEILT MIT POSTLAKE)
         </span>
 
         <div className="grid gap-2 sm:grid-cols-2">
@@ -385,11 +295,11 @@ export default function PostlakeAccounts({
                   </span>
                 </button>
                 <select
-                  value={prefs.accountIds[p] || ""}
+                  value={prefs.bufferAccountIds[p] || ""}
                   onChange={(e) =>
                     onPrefs({
                       ...prefs,
-                      accountIds: { ...prefs.accountIds, [p]: e.target.value },
+                      bufferAccountIds: { ...prefs.bufferAccountIds, [p]: e.target.value },
                     })
                   }
                   disabled={!active}
@@ -411,7 +321,7 @@ export default function PostlakeAccounts({
 
         <div className="mt-2 grid gap-2">
           <div>
-            <label className="mono-label mb-1 block text-[9px] text-coal-400">CAPTION</label>
+            <label className="mono-label mb-1 block text-[9px] text-coal-400">CAPTION (GETEILT)</label>
             <textarea
               rows={2}
               value={prefs.caption}
@@ -421,7 +331,7 @@ export default function PostlakeAccounts({
           </div>
           <div className="grid gap-2 sm:grid-cols-2">
             <div>
-              <label className="mono-label mb-1 block text-[9px] text-coal-400">HASHTAGS</label>
+              <label className="mono-label mb-1 block text-[9px] text-coal-400">HASHTAGS (GETEILT)</label>
               <input
                 type="text"
                 value={prefs.hashtags}

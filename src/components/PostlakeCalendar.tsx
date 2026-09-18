@@ -25,6 +25,12 @@ import {
   syncPostsFromLake,
   type LakePost,
 } from "../lib/postlake";
+import {
+  cancelBufferPost,
+  refreshOpenBufferPosts,
+  rescheduleBufferPost,
+  syncBufferPosts,
+} from "../lib/buffer";
 
 type ViewMode = "month" | "week" | "day";
 
@@ -97,10 +103,14 @@ export default function PostlakeCalendar({
 
   const doSync = async () => {
     setSyncing(true);
+    setError(null);
     try {
-      const res = await syncPostsFromLake({ limit: 100 });
-      onPostsChange(res.posts);
-      if (res.error) setError(res.error);
+      // Beide Versandwege nacheinander (teilen sich denselben lokalen Spiegel)
+      const lake = await syncPostsFromLake({ limit: 100 });
+      const buf = await syncBufferPosts({ limit: 100 });
+      onPostsChange(buf.posts);
+      const errs = [lake.error, buf.error].filter(Boolean);
+      if (errs.length > 0) setError(errs.join(" · "));
     } finally {
       setSyncing(false);
     }
@@ -109,8 +119,10 @@ export default function PostlakeCalendar({
   const doPoll = async () => {
     setSyncing(true);
     try {
-      const res = await refreshOpenPosts();
-      onPostsChange(res.posts);
+      const lake = await refreshOpenPosts();
+      const buf = await refreshOpenBufferPosts();
+      // Beide Refreshes teilen den Cache — der zweite Stand ist der frischeste
+      onPostsChange(buf.posts.length >= 0 ? buf.posts : lake.posts);
     } finally {
       setSyncing(false);
     }
@@ -119,7 +131,7 @@ export default function PostlakeCalendar({
   const doCancel = async (p: LakePost) => {
     setBusy(true);
     try {
-      const next = await cancelPost(p);
+      const next = p.provider === "buffer" ? await cancelBufferPost(p) : await cancelPost(p);
       onPostsChange(next);
       setSelected(null);
     } finally {
@@ -132,7 +144,11 @@ export default function PostlakeCalendar({
     setBusy(true);
     setError(null);
     try {
-      const res = await reschedulePost(p, `${editDate}T${editTime}:00`, timezone);
+      const naive = `${editDate}T${editTime}:00`;
+      const res =
+        p.provider === "buffer"
+          ? await rescheduleBufferPost(p, naive, timezone)
+          : await reschedulePost(p, naive, timezone);
       onPostsChange(res.posts);
       if (res.error) setError(res.error);
       else setSelected(res.posts.find((x) => x.id === p.id) || null);
@@ -305,6 +321,9 @@ export default function PostlakeCalendar({
                       <p className="mt-1 truncate font-display text-[11px] font-bold text-paper-100">
                         {p.title}
                       </p>
+                      <p className="font-mono text-[7.5px] tracking-widest text-coal-500">
+                        {p.provider === "buffer" ? "📦 BUFFER" : "🌊 POSTLAKE"}
+                      </p>
                       <div className="mt-1 flex items-center gap-1">
                         <span className="flex gap-0.5 text-[10px]">
                           {(p.platforms.length > 0 ? p.platforms : ["?"]).slice(0, 4).map((s, i) => (
@@ -457,6 +476,22 @@ export default function PostlakeCalendar({
                     )}
                   </div>
                 </div>
+
+                {selected.provider === "buffer" && selected.videoUrl && (
+                  <div className="border border-coal-700/70 bg-coal-850/60 px-2.5 py-1.5">
+                    <p className="truncate font-mono text-[9px] text-coal-400">
+                      🎬 Video-Host:{" "}
+                      <a
+                        href={selected.videoUrl}
+                        target="_blank"
+                        rel="noreferrer"
+                        className="text-volt-300 underline"
+                      >
+                        {selected.videoUrl}
+                      </a>
+                    </p>
+                  </div>
+                )}
 
                 {selected.errorMessage && (
                   <div className="border border-rose-err/50 bg-rose-err/10 p-3">

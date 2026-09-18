@@ -147,6 +147,54 @@ export async function uploadClipForPostlake(
 }
 
 /**
+ * Lädt einen fertigen Clip für den BUFFER-Versand hoch und gibt die
+ * öffentliche, stabile HTTPS-URL zurück.
+ *
+ * Buffer hat keinen Upload-Endpoint (docs: „Hosting Media") — das Video muss
+ * unter einer dauerhaft erreichbaren URL liegen (keine signierten/ablaufenden
+ * Links, Buffer lädt erst beim Publish). Dafür dient der öffentliche
+ * Supabase-„renders"-Bucket. Dateien dort bitte NICHT löschen, solange Posts
+ * geplant sind.
+ */
+const bufferUrlCache = new Map<string, Promise<string>>();
+
+export async function uploadClipForBuffer(
+  blob: Blob,
+  cacheKey: string,
+  mime?: string
+): Promise<string> {
+  const cached = bufferUrlCache.get(cacheKey);
+  if (cached) return cached;
+
+  const promise = (async () => {
+    if (!supabase) {
+      throw new Error(
+        "Buffer-Versand braucht Video-Hosting: VITE_SUPABASE_URL / VITE_SUPABASE_ANON_KEY konfigurieren (Buffer akzeptiert nur öffentliche HTTPS-URLs, keine Datei-Uploads)."
+      );
+    }
+    const contentType = mimeFor(mime || blob.type);
+    const path = `buffer/${cacheKey}-${Date.now()}.${extFor(contentType)}`;
+    const { error } = await supabase.storage.from("renders").upload(path, blob, {
+      contentType,
+      upsert: true,
+    });
+    if (error) throw new Error(`Video-Hosting fehlgeschlagen: ${error.message || "Supabase-Upload abgelehnt."}`);
+    const { data } = supabase.storage.from("renders").getPublicUrl(path);
+    const url = data?.publicUrl || "";
+    if (!/^https:\/\//i.test(url)) {
+      throw new Error("Video-Hosting lieferte keine öffentliche HTTPS-URL.");
+    }
+    return url;
+  })().catch((e) => {
+    bufferUrlCache.delete(cacheKey); // Retry erlauben
+    throw e;
+  });
+
+  bufferUrlCache.set(cacheKey, promise);
+  return promise;
+}
+
+/**
  * Lädt einen Clip nur in den Supabase-"renders"-Bucket hoch (für lokale
  * Kalender-Vorschau ohne Postlake-Key). Gibt die öffentliche URL zurück.
  */
