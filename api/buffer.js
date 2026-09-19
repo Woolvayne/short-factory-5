@@ -608,8 +608,3 @@ export default async function handler(req, res) {
     });
   }
 }
- false,
-      error: e instanceof Error ? e.message : String(e),
-    });
-  }
-}

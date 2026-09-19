@@ -10,7 +10,10 @@ import { handleGateRequest } from "./server/gate-core.js";
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
-type DevRequest = IncomingMessage & { body?: unknown };
+type DevRequest = IncomingMessage & {
+  body?: unknown;
+  query?: Record<string, string | string[]>;
+};
 type ApiResponse = ServerResponse & {
   status?: (code: number) => ApiResponse;
   json?: (payload: unknown) => void;
@@ -55,13 +58,31 @@ function writeDevJson(res: ServerResponse, code: number, payload: unknown): void
   res.end(JSON.stringify(payload));
 }
 
+function readQuery(req: IncomingMessage): Record<string, string | string[]> {
+  try {
+    const url = new URL(req.url || "/", "http://localhost");
+    const out: Record<string, string | string[]> = {};
+    for (const key of url.searchParams.keys()) {
+      const all = url.searchParams.getAll(key);
+      out[key] = all.length > 1 ? all : (all[0] ?? "");
+    }
+    return out;
+  } catch {
+    return {};
+  }
+}
+
+/** Vercel-Routen, die der Dev-Server lokal aus `api/*.js` bedient. */
+const DEV_API_ROUTES = ["tts", "postlake", "buffer"] as const;
+
 /**
  * Dev-only: bedient die Vercel-API-Routen lokal im Vite-Server.
  *
- * Ohne diese Middleware antwortet `npm run dev` auf `/api/tts` mit Vites
+ * Ohne diese Middleware antwortet `npm run dev` auf `/api/*` mit Vites
  * HTML-Fallback/404 — die Factory zeigt dann beim Klick auf „Video erstellen"
- * nur „TTS relay failed". In Produktion übernimmt Vercel weiterhin die
- * Dateien unter `api/` direkt; diese Middleware gilt ausschließlich lokal.
+ * nur „TTS relay failed", und Postlake-/Buffer-Panels bleiben leer. In
+ * Produktion übernimmt Vercel weiterhin die Dateien unter `api/` direkt;
+ * diese Middleware gilt ausschließlich lokal.
  */
 function apiDevPlugin(mode: string): Plugin {
   return {
@@ -86,18 +107,23 @@ function apiDevPlugin(mode: string): Plugin {
         });
       });
 
-      server.middlewares.use("/api/tts", (req, res) => {
-        void (async () => {
-          const mod = (await import(pathToFileURL(path.resolve(__dirname, "api/tts.js")).href)) as {
-            default: ApiHandler;
-          };
-          const devReq = req as DevRequest;
-          devReq.body = await readJsonBody(req);
-          await mod.default(devReq, withVercelResponse(res));
-        })().catch((e: unknown) => {
-          writeDevJson(res, 500, { ok: false, error: String((e as Error)?.message ?? e) });
+      for (const name of DEV_API_ROUTES) {
+        server.middlewares.use(`/api/${name}`, (req, res) => {
+          void (async () => {
+            const mod = (await import(
+              pathToFileURL(path.resolve(__dirname, `api/${name}.js`)).href
+            )) as {
+              default: ApiHandler;
+            };
+            const devReq = req as DevRequest;
+            devReq.body = await readJsonBody(req);
+            devReq.query = readQuery(req);
+            await mod.default(devReq, withVercelResponse(res));
+          })().catch((e: unknown) => {
+            writeDevJson(res, 500, { ok: false, error: String((e as Error)?.message ?? e) });
+          });
         });
-      });
+      }
     },
   };
 }

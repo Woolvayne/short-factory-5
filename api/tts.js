@@ -21,6 +21,14 @@
  * audioBase64 is a concatenated MP3 stream (audio-24khz-48kbitrate-mono-mp3).
  * offsets/durations are SECONDS (converted from the 100-ns WordBoundary ticks).
  *
+ * Offline fallback: if the Edge upstream is unreachable (403/429/5xx, DNS,
+ * TLS, socket errors), narration is synthesized locally with meSpeak (a JS
+ * port of eSpeak, zero network). The fallback answers with the same shape
+ * but format "audio/wav" (11025 Hz 8-bit mono — small enough for the
+ * serverless response limit), estimated word timings, plus
+ * { "fallback": "mespeak", "warning": "…" }. Video creation therefore no
+ * longer fails just because the TTS upstream is down.
+ *
  * Same-origin with the app → no CORS, no apikey, no auth.
  */
 
@@ -32,8 +40,12 @@ export const config = {
 };
 
 import { createHash, randomBytes } from "node:crypto";
+import { createRequire } from "node:module";
 import WebSocket from "ws";
 import { gateBlocked } from "../server/gate-core.js";
+
+// meSpeak ships as CommonJS; this file is ESM ("type": "module").
+const cjsRequire = createRequire(import.meta.url);
 
 /* ------------------------------------------------------------------ */
 /*  constants — mirrors edge-tts src/edge_tts/constants.py              */
@@ -366,6 +378,216 @@ const toBase64 = (buf) => buf.toString("base64");
 const clamp = (n, lo, hi) => Math.min(hi, Math.max(lo, n));
 
 /* ------------------------------------------------------------------ */
+/*  offline fallback — meSpeak/eSpeak (zero network)                     */
+/*                                                                     */
+/*  Only used when the Edge upstream fails. meSpeak renders a WAV fully */
+/*  locally; it is downsampled to 11025 Hz 8-bit mono so even a max-    */
+/*  length text stays within the serverless response-size limit         */
+/*  (~2.9 MB PCM → ~3.9 MB base64). Word timings are estimated ∝ word   */
+/*  length so captions keep working (slightly off-beat, but present).   */
+/* ------------------------------------------------------------------ */
+
+const MESPEAK_OFFLINE_RATE = 11025;
+const MESPEAK_PCM_BUDGET = 2_900_000; // bytes — keeps base64 JSON < ~4 MB
+const MESPEAK_DEFAULT_SPEED = 175; // eSpeak words per minute
+
+// Static require paths on purpose: the Vercel file tracer only picks up
+// literal module paths (see also vercel.json → functions → includeFiles).
+const mespeakConfigLoader = () => cjsRequire("mespeak/src/mespeak_config.json");
+const MESPEAK_VOICE_LOADERS = {
+  "en/en-us": () => cjsRequire("mespeak/voices/en/en-us.json"),
+  "en/en": () => cjsRequire("mespeak/voices/en/en.json"),
+  de: () => cjsRequire("mespeak/voices/de.json"),
+  fr: () => cjsRequire("mespeak/voices/fr.json"),
+  es: () => cjsRequire("mespeak/voices/es.json"),
+  it: () => cjsRequire("mespeak/voices/it.json"),
+  nl: () => cjsRequire("mespeak/voices/nl.json"),
+  pl: () => cjsRequire("mespeak/voices/pl.json"),
+  pt: () => cjsRequire("mespeak/voices/pt.json"),
+  tr: () => cjsRequire("mespeak/voices/tr.json"),
+};
+
+/** Map an Edge voice name ("de-DE-KatjaNeural") to a meSpeak voice id. */
+function mespeakVoiceId(edgeVoice) {
+  const v = String(edgeVoice || "");
+  if (/^en-US/i.test(v)) return "en/en-us";
+  if (/^en-/i.test(v)) return "en/en";
+  const lang = v.slice(0, 2).toLowerCase();
+  if (MESPEAK_VOICE_LOADERS[lang]) return lang;
+  return "en/en-us";
+}
+
+// Lazily initialized once per warm function instance (the eSpeak engine +
+// config weigh ~5 MB — never pay that on the happy path).
+let mespeakCache = null; // { api, voices: Set<string> }
+
+function ensureMespeak(voiceId) {
+  if (!mespeakCache) {
+    const api = cjsRequire("mespeak");
+    api.loadConfig(mespeakConfigLoader());
+    if (!api.isConfigLoaded()) throw new Error("meSpeak config failed to load");
+    mespeakCache = { api, voices: new Set() };
+  }
+  const { api, voices } = mespeakCache;
+  if (!voices.has(voiceId)) {
+    api.loadVoice(MESPEAK_VOICE_LOADERS[voiceId]());
+    voices.add(voiceId);
+  }
+  api.setDefaultVoice(voiceId);
+  return api;
+}
+
+/** Split long texts at sentence boundaries (eSpeak handles ~1k chars best). */
+function splitForOffline(text, maxLen = 900) {
+  const sentences = String(text).match(/[^.!?;:\n]+[.!?;:\n]*\s*/g) || [String(text)];
+  const chunks = [];
+  let cur = "";
+  for (const s of sentences) {
+    if ((cur + s).trim().length > maxLen && cur.trim()) {
+      chunks.push(cur.trim());
+      cur = s;
+    } else {
+      cur += s;
+    }
+  }
+  if (cur.trim()) chunks.push(cur.trim());
+  // hard-split pathological single-sentence blobs on word boundaries
+  const out = [];
+  for (const c of chunks) {
+    if (c.length <= maxLen) {
+      out.push(c);
+      continue;
+    }
+    let part = "";
+    for (const w of c.split(/\s+/)) {
+      if ((`${part} ${w}`).trim().length > maxLen && part) {
+        out.push(part.trim());
+        part = w;
+      } else {
+        part = part ? `${part} ${w}` : w;
+      }
+    }
+    if (part.trim()) out.push(part.trim());
+  }
+  return out.filter(Boolean);
+}
+
+/** Tolerant RIFF/WAVE parser → { sampleRate, channels, bits, pcm }. */
+function parseWavPcm(buf) {
+  if (
+    buf.length < 44 ||
+    buf.toString("ascii", 0, 4) !== "RIFF" ||
+    buf.toString("ascii", 8, 12) !== "WAVE"
+  ) {
+    throw new Error("meSpeak returned invalid WAV data");
+  }
+  let sampleRate = 0;
+  let channels = 0;
+  let bits = 0;
+  let pcm = null;
+  let off = 12;
+  while (off + 8 <= buf.length) {
+    const id = buf.toString("ascii", off, off + 4);
+    const size = buf.readUInt32LE(off + 4);
+    if (id === "fmt " && size >= 16) {
+      channels = buf.readUInt16LE(off + 10);
+      sampleRate = buf.readUInt32LE(off + 12);
+      bits = buf.readUInt16LE(off + 22);
+    } else if (id === "data") {
+      pcm = buf.subarray(off + 8, off + 8 + size);
+    }
+    off += 8 + size + (size % 2);
+  }
+  if (!sampleRate || !pcm || pcm.length === 0) {
+    throw new Error("meSpeak WAV contains no audio frames");
+  }
+  return { sampleRate, channels: channels || 1, bits: bits || 16, pcm: Buffer.from(pcm) };
+}
+
+/** Decimate 16-bit PCM to 11025 Hz 8-bit unsigned mono (universally decodable). */
+function downsampleToOffline(pcm, inRate) {
+  const factor = Math.max(1, Math.round(inRate / MESPEAK_OFFLINE_RATE));
+  const outRate = Math.round(inRate / factor);
+  const inSamples = Math.floor(pcm.length / 2);
+  const outSamples = Math.ceil(inSamples / factor);
+  const out = Buffer.alloc(outSamples);
+  for (let i = 0; i < outSamples; i++) {
+    const s = pcm.readInt16LE(Math.min(i * factor, inSamples - 1) * 2);
+    out[i] = clamp((s >> 8) + 128, 0, 255);
+  }
+  return { outRate, pcm8: out };
+}
+
+function buildWav8(pcm8, sampleRate) {
+  const header = Buffer.alloc(44);
+  header.write("RIFF", 0);
+  header.writeUInt32LE(36 + pcm8.length, 4);
+  header.write("WAVE", 8);
+  header.write("fmt ", 12);
+  header.writeUInt32LE(16, 16);
+  header.writeUInt16LE(1, 20); // PCM
+  header.writeUInt16LE(1, 22); // mono
+  header.writeUInt32LE(sampleRate, 24);
+  header.writeUInt32LE(sampleRate, 28); // byteRate = rate × 1ch × 1B
+  header.writeUInt16LE(1, 32); // blockAlign
+  header.writeUInt16LE(8, 34); // bitsPerSample
+  header.write("data", 36);
+  header.writeUInt32LE(pcm8.length, 40);
+  return Buffer.concat([header, pcm8]);
+}
+
+/**
+ * Offline synthesis — same contract as synthesize(), but local.
+ * Exported for the local smoke test; the handler calls it on upstream failure.
+ */
+export async function synthesizeOffline(text, voice, rate, pitch) {
+  const cleaned = sanitizeText(text);
+  if (!cleaned) throw new Error("nothing to synthesize");
+  const voiceId = mespeakVoiceId(voice);
+  const api = ensureMespeak(voiceId);
+
+  // requested rate (Edge-style ±%) → eSpeak words-per-minute
+  let speed = clamp(Math.round(MESPEAK_DEFAULT_SPEED * (1 + rate / 100)), 80, 450);
+  // …but never so slow that the WAV would blow the response-size budget
+  const wordCount = Math.max(1, cleaned.split(/\s+/).length);
+  const minSpeed = Math.ceil((60 * wordCount * MESPEAK_OFFLINE_RATE) / MESPEAK_PCM_BUDGET);
+  if (speed < minSpeed) speed = Math.min(450, minSpeed);
+  const p = clamp(50 + Math.round(pitch), 0, 99);
+
+  const chunks = splitForOffline(cleaned);
+  const parts = [];
+  const words = [];
+  let cursor = 0;
+  for (const chunk of chunks) {
+    const raw = api.speak(chunk, {
+      voice: voiceId,
+      speed,
+      pitch: p,
+      wordgap: 2,
+      rawdata: "array", // plain number[] — Buffer.from() it, no deprecated `new Buffer`
+    });
+    if (!raw || raw.length === 0) throw new Error("meSpeak returned no audio");
+    const { sampleRate, pcm } = parseWavPcm(Buffer.from(raw));
+    const { outRate, pcm8 } = downsampleToOffline(pcm, sampleRate);
+    const dur = pcm8.length / outRate;
+    parts.push({ outRate, pcm8 });
+
+    const chunkWords = chunk.split(/\s+/).filter(Boolean);
+    const weights = chunkWords.map((w) => w.replace(/[^\p{L}\p{N}]/gu, "").length + 1);
+    const total = weights.reduce((a, b) => a + b, 0) || 1;
+    for (let i = 0; i < chunkWords.length; i++) {
+      const d = (weights[i] / total) * dur;
+      words.push({ text: chunkWords[i], offset: cursor, duration: d });
+      cursor += d;
+    }
+  }
+
+  const outRate = parts[0].outRate;
+  const audio = buildWav8(Buffer.concat(parts.map((x) => x.pcm8)), outRate);
+  return { audio, words, voiceId, sampleRate: outRate };
+}
+
+/* ------------------------------------------------------------------ */
 /*  handler                                                             */
 /* ------------------------------------------------------------------ */
 
@@ -410,28 +632,46 @@ export default async function handler(req, res) {
     const rate = clamp(Number(body?.rate ?? 0) || 0, -50, 50);
     const pitch = clamp(Number(body?.pitch ?? 0) || 0, -50, 50);
 
-    const { audio, words } = await synthesize(text, voice, rate, pitch);
-    if (audio.length === 0) {
-      return res.status(502).json({ ok: false, error: "TTS returned no audio frames" });
+    let audio;
+    let words;
+    let offline = false;
+    let offlineRate = 0;
+    let offlineWarning = "";
+    try {
+      ({ audio, words } = await synthesize(text, voice, rate, pitch));
+      if (!audio || audio.length === 0) throw new Error("TTS returned no audio frames");
+    } catch (upstreamErr) {
+      // Upstream down → still render the video, with a local eSpeak voice.
+      console.error("tts upstream failed, using offline fallback", upstreamErr);
+      const fb = await synthesizeOffline(text, voice, rate, pitch);
+      audio = fb.audio;
+      words = fb.words;
+      offline = true;
+      offlineRate = fb.sampleRate;
+      offlineWarning =
+        `Edge-TTS war nicht erreichbar (${String(upstreamErr?.message ?? upstreamErr).slice(0, 160)}). ` +
+        "Offline-Ersatzstimme (eSpeak) verwendet.";
     }
 
     return res.status(200).json({
       ok: true,
-      format: "audio/mpeg",
-      sampleRate: 24000,
+      format: offline ? "audio/wav" : "audio/mpeg",
+      sampleRate: offline ? offlineRate : 24000,
       audioBase64: toBase64(audio),
       words,
+      ...(offline ? { fallback: "mespeak", warning: offlineWarning } : {}),
     });
   } catch (e) {
+    // Reached only when BOTH the upstream and the offline fallback failed.
     const status = upstreamStatus(e);
     const code = (status && status >= 400) || retryableUpstreamError(e) ? 502 : 500;
     const message = String(e?.message ?? e).slice(0, 300);
-    console.error("tts relay failed", e);
+    console.error("tts relay failed (upstream + offline fallback)", e);
     return res.status(code).json({
       ok: false,
       error: status
-        ? `TTS upstream failed (HTTP ${status}): ${message}`
-        : `TTS upstream failed: ${message}`,
+        ? `TTS failed (HTTP ${status}): ${message}`
+        : `TTS failed (upstream + offline fallback): ${message}`,
     });
   }
 }
