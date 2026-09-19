@@ -31,8 +31,9 @@ export const config = {
   maxDuration: 60,
 };
 
-import { createHash } from "node:crypto";
+import { createHash, randomBytes } from "node:crypto";
 import WebSocket from "ws";
+import { gateBlocked } from "../server/gate-core.js";
 
 /* ------------------------------------------------------------------ */
 /*  constants — mirrors edge-tts src/edge_tts/constants.py              */
@@ -71,10 +72,7 @@ const ROUNDING_SECONDS = 300n; // token rotates every 5 minutes
 
 let clockSkewMs = 0;
 
-const hex32 = () =>
-  [...crypto.getRandomValues(new Uint8Array(16))]
-    .map((b) => b.toString(16).padStart(2, "0"))
-    .join("");
+const hex32 = () => randomBytes(16).toString("hex");
 
 /** SHA-256(ticks rounded down to 5min + trusted token), uppercase hex. BigInt
  *  is required — the tick value (~1.34e17) exceeds 2^53. */
@@ -87,11 +85,7 @@ function generateSecMsGec() {
 }
 
 /** Fresh muid cookie per connection, like the reference client. */
-const generateMuid = () =>
-  [...crypto.getRandomValues(new Uint8Array(16))]
-    .map((b) => b.toString(16).padStart(2, "0"))
-    .join("")
-    .toUpperCase();
+const generateMuid = () => randomBytes(16).toString("hex").toUpperCase();
 
 const wssUrl = (gec, connId) =>
   "wss://speech.platform.bing.com/consumer/speech/synthesize/readaloud/edge/v1" +
@@ -137,9 +131,17 @@ function speechConfigFrame() {
     `X-Timestamp:${dateToString()}\r\n` +
     "Content-Type:application/json; charset=utf-8\r\n" +
     "Path:speech.config\r\n\r\n" +
-    body
+    body +
+    "\r\n"
   );
 }
+
+const sanitizeText = (s) =>
+  s
+    // Edge rejects XML-invalid C0 controls; keep normal whitespace usable.
+    .replace(/[\u0000-\u0008\u000B\u000C\u000E-\u001F]/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
 
 const escapeXml = (s) =>
   s
@@ -148,6 +150,14 @@ const escapeXml = (s) =>
     .replace(/>/g, "&gt;")
     .replace(/'/g, "&apos;")
     .replace(/"/g, "&quot;");
+
+const unescapeXml = (s) =>
+  s
+    .replace(/&quot;/g, '"')
+    .replace(/&apos;/g, "'")
+    .replace(/&gt;/g, ">")
+    .replace(/&lt;/g, "<")
+    .replace(/&amp;/g, "&");
 
 const signed = (n) => `${n >= 0 ? "+" : "-"}${Math.abs(Math.round(n))}`;
 
@@ -182,6 +192,39 @@ function parseTextFrame(raw) {
 /*  synthesis — one WebSocket per request                               */
 /* ------------------------------------------------------------------ */
 
+function makeTtsError(message, extra = {}) {
+  const err = new Error(message);
+  Object.assign(err, extra);
+  return err;
+}
+
+function upstreamStatus(e) {
+  const direct = Number(e?.statusCode ?? e?.status);
+  if (Number.isFinite(direct) && direct > 0) return direct;
+  const msg = String(e?.message ?? "");
+  const m = msg.match(/(?:response|status|HTTP)[: ]+(\d{3})/i);
+  return m ? Number(m[1]) : null;
+}
+
+function upstreamDate(e) {
+  return (
+    e?.responseHeaders?.date ??
+    e?.httpResponse?.headers?.date ??
+    e?.headers?.date ??
+    null
+  );
+}
+
+function retryableUpstreamError(e) {
+  const status = upstreamStatus(e);
+  if (status && [408, 425, 429, 500, 502, 503, 504].includes(status)) return true;
+  const code = String(e?.code ?? "");
+  if (["ECONNRESET", "ETIMEDOUT", "EAI_AGAIN", "ENOTFOUND", "ECONNREFUSED"].includes(code)) return true;
+  return /timed out|socket closed early|network socket|TLS connection|aborted/i.test(String(e?.message ?? ""));
+}
+
+const wait = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
 function speakOnce(text, voice, rate, pitch) {
   return new Promise((resolve, reject) => {
     let settled = false;
@@ -192,10 +235,11 @@ function speakOnce(text, voice, rate, pitch) {
     const ws = new WebSocket(wssUrl(generateSecMsGec(), hex32()), {
       headers,
       perMessageDeflate: true,
+      handshakeTimeout: 15_000,
     });
 
     const timer = setTimeout(() => {
-      finish(new Error("TTS socket timed out after 45s"));
+      finish(makeTtsError("TTS socket timed out after 45s", { code: "ETIMEDOUT" }));
     }, 45_000);
 
     const finish = (err) => {
@@ -226,11 +270,22 @@ function speakOnce(text, voice, rate, pitch) {
       ws.send(ssmlFrame(text, voice, rate, pitch));
     });
 
+    ws.on("unexpected-response", (_req, response) => {
+      const statusCode = response.statusCode ?? 0;
+      response.resume();
+      finish(
+        makeTtsError(`TTS socket unexpected response: ${statusCode}`, {
+          statusCode,
+          responseHeaders: response.headers,
+        })
+      );
+    });
+
     ws.on("error", (err) => finish(err instanceof Error ? err : new Error(String(err))));
     ws.on("close", (code) => {
       if (settled) return;
       if (chunks.length > 0) finish(); // server dropped after streaming — use what we have
-      else finish(new Error(`TTS socket closed early (code ${code})`));
+      else finish(makeTtsError(`TTS socket closed early (code ${code})`, { closeCode: code }));
     });
 
     ws.on("message", (data, isBinary) => {
@@ -243,7 +298,7 @@ function speakOnce(text, voice, rate, pitch) {
             for (const meta of payload?.Metadata ?? []) {
               if (meta?.Type === "WordBoundary" && meta?.Data) {
                 words.push({
-                  text: meta.Data.text?.Text ?? "",
+                  text: unescapeXml(String(meta.Data.text?.Text ?? "")),
                   offset: Number(meta.Data.Offset ?? 0) / 1e7,
                   duration: Number(meta.Data.Duration ?? 0) / 1e7,
                 });
@@ -259,7 +314,8 @@ function speakOnce(text, voice, rate, pitch) {
           if (2 + headerLen > buf.length) return;
           const head = buf.toString("utf8", 2, 2 + headerLen);
           if (/^Path:audio\r\n/im.test(head)) {
-            chunks.push(buf.subarray(2 + headerLen));
+            const audio = buf.subarray(2 + headerLen);
+            if (audio.length > 0) chunks.push(audio);
           }
         }
       } catch {
@@ -270,25 +326,40 @@ function speakOnce(text, voice, rate, pitch) {
 }
 
 /**
- * Speak with one 403 retry: on a skew-induced 403, read the server's Date
- * header, correct the clock, and try once more (same as the reference).
+ * Speak with hardening from edge-tts:
+ * - on skew-induced 403, read the upstream Date header and retry once
+ * - on one-off socket/TLS hiccups, retry once before surfacing a 502
  */
 async function synthesize(text, voice, rate, pitch) {
-  try {
-    return await speakOnce(text, voice, rate, pitch);
-  } catch (e) {
-    const status = e?.message?.match(/response: (\d+)/)?.[1];
-    const serverDate = e?.httpResponse?.headers?.date;
-    if (status === "403" && serverDate) {
-      const skew = Date.parse(serverDate) - Date.now();
-      if (Number.isFinite(skew) && Math.abs(skew) > 1000) {
-        clockSkewMs += skew;
-        console.warn(`tts: clock skew ${skew}ms detected via 403, retrying`);
-        return await speakOnce(text, voice, rate, pitch);
+  const cleaned = sanitizeText(text);
+  let lastErr = null;
+
+  for (let attempt = 0; attempt < 2; attempt++) {
+    try {
+      return await speakOnce(cleaned, voice, rate, pitch);
+    } catch (e) {
+      lastErr = e;
+      const status = upstreamStatus(e);
+      const serverDate = upstreamDate(e);
+
+      if (status === 403 && serverDate) {
+        const skew = Date.parse(serverDate) - Date.now();
+        if (Number.isFinite(skew) && Math.abs(skew) > 1000) {
+          clockSkewMs += skew;
+          console.warn(`tts: clock skew ${skew}ms detected via 403, retrying`);
+          return await speakOnce(cleaned, voice, rate, pitch);
+        }
       }
+
+      if (attempt === 0 && retryableUpstreamError(e)) {
+        await wait(700);
+        continue;
+      }
+      throw e;
     }
-    throw e;
   }
+
+  throw lastErr;
 }
 
 const toBase64 = (buf) => buf.toString("base64");
@@ -313,10 +384,18 @@ export default async function handler(req, res) {
   if (gateBlocked(req, res)) return;
 
   try {
-    const body =
-      typeof req.body === "string" ? JSON.parse(req.body || "{}") : (req.body ?? {});
-    const text = body?.text;
-    if (typeof text !== "string" || text.trim().length < 3) {
+    let body = req.body ?? {};
+    if (typeof body === "string") {
+      try {
+        body = JSON.parse(body || "{}");
+      } catch {
+        return res.status(400).json({ ok: false, error: "Invalid JSON body" });
+      }
+    }
+
+    const rawText = body?.text;
+    const text = typeof rawText === "string" ? sanitizeText(rawText) : "";
+    if (text.length < 3) {
       return res.status(400).json({ ok: false, error: "text (string, ≥3 chars) is required" });
     }
     if (text.length > 4000) {
@@ -331,7 +410,7 @@ export default async function handler(req, res) {
     const rate = clamp(Number(body?.rate ?? 0) || 0, -50, 50);
     const pitch = clamp(Number(body?.pitch ?? 0) || 0, -50, 50);
 
-    const { audio, words } = await synthesize(text.trim(), voice, rate, pitch);
+    const { audio, words } = await synthesize(text, voice, rate, pitch);
     if (audio.length === 0) {
       return res.status(502).json({ ok: false, error: "TTS returned no audio frames" });
     }
@@ -344,7 +423,15 @@ export default async function handler(req, res) {
       words,
     });
   } catch (e) {
-    console.error("tts relay crashed", e);
-    return res.status(500).json({ ok: false, error: String(e?.message ?? e).slice(0, 300) });
+    const status = upstreamStatus(e);
+    const code = (status && status >= 400) || retryableUpstreamError(e) ? 502 : 500;
+    const message = String(e?.message ?? e).slice(0, 300);
+    console.error("tts relay failed", e);
+    return res.status(code).json({
+      ok: false,
+      error: status
+        ? `TTS upstream failed (HTTP ${status}): ${message}`
+        : `TTS upstream failed: ${message}`,
+    });
   }
 }
