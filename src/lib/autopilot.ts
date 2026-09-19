@@ -1,39 +1,34 @@
 /**
- * Autopilot — vollautomatisches Rendern + Posten über Postlake.
+ * Autopilot — vollautomatisches Rendern + Posten über Buffer.
  *
  * Wenn der Auto-Modus läuft, passiert alles ohne Nachfrage und ohne Klick:
  *   Ideen sichern → Scripts + Voices vorbereiten → rendern → jedes fertige
- *   Video an Postlake schicken → nächste Runde. Gestoppt wird nur per STOP.
+ *   Video an Buffer schicken → nächste Runde. Gestoppt wird nur per STOP.
  *
  * Das Stunden-Limit (voreingestellt, 1–100 Videos/Stunde) drosselt den
- * POSTLAKE-VERSAND (Upload + POST /v1/posts). Gerendert wird durchgehend —
- * was das Limit übersteigt, wartet in der Sende-Warteschlange.
+ * BUFFER-VERSAND (Hosting-Upload + createPost je Kanal). Gerendert wird
+ * durchgehend — was das Limit übersteigt, wartet in der Sende-Warteschlange.
  *
  * Hinweis: Der Browser-Tab muss offen bleiben (Echtzeit-Canvas-Rendering).
  */
 
-import type { SocialPlatform } from "./postlake";
-import type { DispatchProvider } from "./dispatch";
+import type { SocialPlatform } from "./posts";
 
 export type AutopilotMode = "now" | "scheduled";
 
 export interface AutopilotConfig {
-  /** Versandweg im Auto-Modus: Postlake oder Buffer (kein Nachfragen) */
-  provider: DispatchProvider;
-  /** Stunden-Limit: 1–100 Videos/Stunde an den Versandweg (voreingestellt: 10) */
+  /** Stunden-Limit: 1–100 Videos/Stunde an Buffer (voreingestellt: 10) */
   videosPerHour: number;
   /** "now" = sofort veröffentlichen · "scheduled" = freie Slots (06:00/20:00) */
   mode: AutopilotMode;
   /** Plattform-Rotation für den Versand */
   platforms: SocialPlatform[];
-  /** Optional: feste Postlake-Account-IDs je Plattform (sonst erster verbundener Kanal) */
-  accountIds: Partial<Record<SocialPlatform, string>>;
   /** Optional: feste Buffer-Kanal-IDs je Plattform (sonst erster verbundener Kanal) */
   bufferAccountIds: Partial<Record<SocialPlatform, string>>;
   /** Caption-Vorlage; {title} wird durch die Story-Idee ersetzt */
   caption: string;
   hashtags: string;
-  /** Live-Status bei Postlake pollen (Veröffentlicht/Fehler erkennen) */
+  /** Live-Status bei Buffer pollen (Veröffentlicht/Fehler erkennen) */
   pollStatus: boolean;
   /** Nach jeder 10er-Runde automatisch mit frischen Ideen fortfahren */
   loopRounds: boolean;
@@ -43,11 +38,9 @@ export const AUTOPILOT_MIN_PER_HOUR = 1;
 export const AUTOPILOT_MAX_PER_HOUR = 100;
 
 export const AUTOPILOT_DEFAULTS: AutopilotConfig = {
-  provider: "postlake",
   videosPerHour: 10,
   mode: "now",
   platforms: ["tiktok", "instagram", "youtube"],
-  accountIds: {},
   bufferAccountIds: {},
   caption:
     "You won't believe how this story ends...\nStay until the end because the plot twist is INSANE.\nWould you have done the same?",
@@ -73,7 +66,6 @@ export function loadAutopilotConfig(): AutopilotConfig {
     return {
       ...AUTOPILOT_DEFAULTS,
       ...parsed,
-      provider: parsed.provider === "buffer" ? "buffer" : "postlake",
       videosPerHour: clampPerHour(Number(parsed.videosPerHour)),
       platforms:
         Array.isArray(parsed.platforms) && parsed.platforms.length > 0
@@ -81,7 +73,6 @@ export function loadAutopilotConfig(): AutopilotConfig {
               p === "tiktok" || p === "instagram" || p === "youtube"
             )
           : [...AUTOPILOT_DEFAULTS.platforms],
-      accountIds: parsed.accountIds || {},
       bufferAccountIds: parsed.bufferAccountIds || {},
     };
   } catch {
@@ -101,7 +92,7 @@ export function saveAutopilotConfig(cfg: AutopilotConfig): void {
 /*  Dispatch-Log: rolling 60-Minuten-Fenster für das Stunden-Limit      */
 /* ------------------------------------------------------------------ */
 
-/** Zeitstempel (ms) aller Postlake-Versände, persistent — überlebt Reloads. */
+/** Zeitstempel (ms) aller Buffer-Versände, persistent — überlebt Reloads. */
 export function loadDispatchLog(): number[] {
   try {
     const raw = localStorage.getItem(LOG_KEY);

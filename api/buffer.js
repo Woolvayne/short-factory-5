@@ -1,5 +1,5 @@
 /**
- * ShortsFactory — Buffer Backend Route (zweiter Post-Weg neben Postlake)
+ * ShortsFactory — Buffer Backend Route (einziger Post-Weg)
  *
  * Exakt nach der offiziellen Buffer-API-Dokumentation
  * (https://developers.buffer.com — GraphQL, Stand 2026):

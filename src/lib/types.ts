@@ -24,14 +24,10 @@ export interface LocalRenderItem {
   blob?: Blob;
   blobUrl?: string;
   error?: string;
-  /** Posting-Status (läuft wahlweise über Postlake oder Buffer) */
+  /** Posting-Status (Versand über Buffer) */
   posting?: boolean;
-  /** Video wurde übergeben (manuell oder Autopilot) */
+  /** Video wurde an Buffer übergeben (manuell oder Autopilot) */
   posted?: boolean;
-  /** Postlake-Post-ID nach erfolgreichem Versand (nur Postlake-Weg) */
-  postlakePostId?: string | null;
-  /** Versandweg des erfolgreichen Posts */
-  postedVia?: "postlake" | "buffer";
   /** Fehlermeldung des letzten Sendeversuchs (null nach Erfolg) */
   postError?: string | null;
 }

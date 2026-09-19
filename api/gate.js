@@ -12,8 +12,8 @@
  *   Vercel → Project → Settings → Environment Variables → APP_PASSWORD
  *
  * Es wird serverseitig verglichen (timing-sicher) und nie ins Client-Bundle
- * gebaut. Nach dem Entsperren gelten auch /api/tts, /api/postlake und
- * /api/buffer als freigeschaltet (shared HttpOnly-Cookie-Session).
+ * gebaut. Nach dem Entsperren gelten auch /api/tts und /api/buffer als
+ * freigeschaltet (shared HttpOnly-Cookie-Session).
  */
 
 export const config = {

@@ -72,115 +72,59 @@ GATE_TTL_HOURS=168   # optional: Session-Dauer in Stunden (Default = 7 Tage)
 
 | Zustand | Verhalten |
 | --- | --- |
-| **Variable gesetzt** | Beim App-Start erscheint ein Lock-Screen. Erst nach dem Passwort werden die Factory (**UI und alle `/api`-Routen**: tts, postlake, buffer, gate) freigeschaltet. Die signierte HttpOnly-Session-Cookie hält standardmäßig **7 Tage** — kein Neu-Fragen bei jedem Reload. Passwort ändern in Vercel → alle Sessions sofort ungültig. |
+| **Variable gesetzt** | Beim App-Start erscheint ein Lock-Screen. Erst nach dem Passwort werden die Factory (**UI und alle `/api`-Routen**: tts, buffer, gate) freigeschaltet. Die signierte HttpOnly-Session-Cookie hält standardmäßig **7 Tage** — kein Neu-Fragen bei jedem Reload. Passwort ändern in Vercel → alle Sessions sofort ungültig. |
 | **Variable leer / fehlt** | Es wird **nicht** nach einem Passwort gefragt — die App läuft unverändert offen. Statt dem Prompt zeigt sie nur einen dezenten **Verweis** auf die Variable: Banner unter dem Hero (mit Link zur Vercel-Doku), `ACCESS GATE`-Zeile im Hero-Panel und `GATE OFF` im Footer. |
 
 Technik: `api/gate.js` (`GET` Status · `POST` entsperren · `DELETE` sperren)
 vergleicht das Passwort serverseitig über SHA-256-Digests mit
 `timingSafeEqual` und bremst Fehlversuche pro IP ab. Bei Erfolg setzt es ein
 HMAC-signiertes Cookie (Secret = aus dem Passwort abgeleitet) — dieselbe
-Session schaltet dann auch `/api/tts`, `/api/postlake` und `/api/buffer` frei
+Session schaltet dann auch `/api/tts` und `/api/buffer` frei
 (`server/gate-core.js`). Client-Seite: `src/lib/gate.ts` +
 `src/components/GatePanel.tsx`. Lokal ist das Gate in den `npm run dev`-Server
 eingebaut — einfach `APP_PASSWORD` in eine `.env` schreiben.
 
-## One-Page Dashboard (Buffer + Postlake)
+## One-Page Dashboard (Buffer)
 
 Alles liegt auf **einer** Seite. Auf Desktop/iPad läuft ein Split-Screen:
 
 ```
-┌─ Dashboard: Heute · Geplant · Veröffentlicht · Stunde · Credits ───┐
+┌─ Dashboard: Heute · Geplant · Veröffentlicht · Stunde ─────────────┐
 ├──────────────────────────┬────────────────────────────────────────┤
 │ LINKS · Video Factory    │ RECHTS · Autopilot + Social            │
 │ Settings · Titel         │ Autopilot (Auto-Modus 1–100/h)         │
-│ Clip Mill · Musik        │ Buffer + Postlake Kanäle               │
+│ Clip Mill · Musik        │ Buffer Kanäle                          │
 │ Assembly · Output Bay    │ Content Kalender (Monat/Woche/Tag)      │
-│                          │ Analytics (7/30/90 Tage)                │
 └──────────────────────────┴────────────────────────────────────────┘
 ```
 
 Beide Spalten scrollen unabhängig. Auf dem Smartphone stapelt sich alles
 automatisch untereinander, mit einer horizontal scrollbaren Sektions-Navigation
-(🎬 Create · 📤 Post · 📅 Calendar · 📊 Analytics · ⚙ Settings). Der Header ist
+(🎬 Create · 📤 Post · 📅 Calendar · ⚙ Settings). Der Header ist
 sticky, die Sprungziele scrollen sanft.
 
-### Versandwege: Buffer ODER Postlake (wählbar)
+### Versandweg: Buffer
 
-**Jeder POST-Button fragt nach dem Versandweg: [Buffer](https://publish.buffer.com)
-oder [Postlake](https://app.postlake.dev/app).** Die Auswahl erscheint als Dialog
-beim Klick (letzte Wahl wird vorausgewählt); der Autopilot nutzt den in seiner
-Config gewählten Dienst. Kalender & Dashboard zeigen beide Wege gemeinsam an
-(📦 BUFFER- / 🌊 POSTLAKE-Badge pro Post).
+**Jeder POST-Button schickt direkt über [Buffer](https://publish.buffer.com).**
+Der Autopilot nutzt denselben Weg. Kalender & Dashboard zeigen alle Posts aus
+dem lokalen Spiegel (📦 BUFFER-Badge pro Post; Einträge aus der Zeit vor der
+Buffer-only-Umstellung bleiben als 🗂 BESTAND sichtbar und lassen sich nur noch
+lokal umplanen oder entfernen).
 
-`api/postlake.js` ist eine Node-Serverless-Function und spricht die Postlake-REST-API
-unter `https://api.postlake.dev/v1`. Der **`POSTLAKE_API_KEY` bleibt ausschließlich
-serverseitig** — er taucht nirgends im Client-Bundle auf.
+**Post all:** Der Button in der Output-Bay (und **POST** auf jeder Karte) postet
+sofort mit den gespeicherten Voreinstellungen (Kanäle, Modus Sofort/Slots,
+Caption, Hashtags). Der **SOFORT/PLANEN-Schalter** sitzt als kompakte
+Segment-Steuerung direkt davor (aktiv = volt): SOFORT schickt sofort raus,
+PLANEN belegt automatisch die nächsten freien Slots (06:00 & 20:00 Berlin;
+belegte Slots werden übersprungen, nie doppelt belegt). Fortschritt läuft auf
+Button & Karten, Fehler landen rot im Kalender.
 
-```bash
-# Vercel → Project Settings → Environment Variables
-POSTLAKE_API_KEY=sk_live_...      # app.postlake.dev → API Keys (zeigt sich nur einmal!)
-```
+**Kalender:** Buffer-Postliste (Quelle der Wahrheit) + lokaler Spiegel in einem
+gemeinsamen Cache. Geplante Posts lassen sich umplanen und stornieren;
+**STATUS** pollt offene Posts, **SYNC** lädt die Liste neu. Performance-Zahlen
+misst du im Buffer-Dashboard.
 
-Setup in 3 Schritten:
-
-1. Konto unter [app.postlake.dev](https://app.postlake.dev/app) anlegen, E-Mail
-   verifizieren (schaltet Gratis-Credits frei).
-2. Unter **Channels** Kanäle verbinden (TikTok/YouTube sofort; Instagram/Facebook
-   sind bei Postlake teils noch im Partner-Review) und **API Keys → Create API key**.
-3. Key als `POSTLAKE_API_KEY` in Vercel setzen, neu deployen, in der App auf **SYNC** tippen.
-
-Ablauf pro Video (exakt nach [docs.postlake.dev](https://docs.postlake.dev)):
-
-1. **Media:** `POST /v1/media/batch` (JSON) liefert eine signierte PUT-URL —
-   der Browser lädt die Render-Bytes direkt hoch, der Key bleibt geheim. Ergebnis:
-   eine `med_…`-ID. Binär-Bodies gehen roh durch die Server-Route (kein
-   JSON-Serialize → kein HTTP 413 mehr), signierte PUTs senden exakt die
-   vorgegebenen Header (Content-Type nur ergänzen, wenn nicht schon gesetzt).
-   **Fallback-Kette** (serverseitig, schadet nie): Supabase-Hosting →
-   ① `{url}`-Ingest → ② Bytes laden + serverseitig auf signierte PUT-URL →
-   ③ roher `POST /v1/media` (nur ≤ 8 MB). Fehlermeldungen nennen MB + Diagnose
-   pro Schritt.
-2. **Validate:** `POST /v1/posts/validate` (kostenlos) prüft Caption-, Media- und
-   Options-Regeln vorab.
-3. **Create:** `POST /v1/posts` mit `accounts`, `media`, optional `scheduledAt` +
-   `timezone` — **ein Call fächert auf alle Kanäle auf** (`targets[]` pro Kanal
-   mit eigenem Status und Live-URL). `Idempotency-Key` verhindert Doppel-Posts
-   bei Retries.
-4. **Status:** `GET /v1/posts/{id}` pollen bis `published`/`partial`/`failed`
-   (`processing` ist normal bei TikTok/Reels/YouTube).
-
-Plattform-Details, die der Server automatisch setzt:
-
-* **TikTok:** `platformOptions.tiktok.privacyLevel` ist Pflicht (aus der
-  Publish-Info des Kanals gelesen, sonst `PUBLIC_TO_EVERYONE`), `mode: direct`.
-* **YouTube:** `platformOptions.youtube.title` (≤100) + `privacyStatus: public`.
-* **Planen:** naive Wandzeit + `timezone: Europe/Berlin` (06:00 & 20:00 Default);
-  belegte Slots werden übersprungen, nie doppelt belegt.
-
-**Credits:** 1 Credit pro veröffentlichtem Kanal-Post (nur Erfolge zählen).
-Free: 20/Monat. Das Guthaben steht im Dashboard, in der Kanal-Leiste und im
-Autopilot-Panel — bitte vor großen Läufen prüfen.
-
-**Post all:** Der Button in der Output-Bay (und **POST** auf jeder Karte) öffnet
-zuerst die **Versandweg-Auswahl: 📦 Buffer oder 🌊 Postlake** (mit Live-Status:
-Kanäle bereit / Key fehlt; letzte Wahl ist vorausgewählt). Danach läuft alles
-mit den gespeicherten Voreinstellungen (Kanäle, Modus Sofort/Slots, Caption,
-Hashtags). Der **SOFORT/PLANEN-Schalter** sitzt als kompakte Segment-Steuerung
-direkt davor (aktiv = volt): SOFORT schickt sofort raus, PLANEN belegt
-automatisch die nächsten freien Slots. Fortschritt läuft auf Button & Karten,
-Fehler landen rot im Kalender.
-
-**Kalender:** Postlisten von Postlake *und* Buffer (Quellen der Wahrheit) +
-lokale Spiegel in einem gemeinsamen Cache (Badge 📦/🌊 pro Post). Geplante
-Posts lassen sich umplanen und stornieren (richtige API je Badge);
-**STATUS** pollt offene Posts beider Dienste, **SYNC** lädt beide Listen neu.
-
-**Analytics:** `GET /v1/analytics?period=7d|30d|90d` (kostenlos) + Top-Posts —
-einheitliche Kennzahlen (Impressions, Reach, Likes, Kommentare, Shares …)
-über alle Netzwerke. (Gilt für Postlake; Buffer-Posts misst du im
-Buffer-Dashboard.)
-
-### Buffer-Integration (zweiter Post-Weg)
+### Buffer-Integration
 
 `api/buffer.js` ist eine Node-Serverless-Function und spricht die
 Buffer-GraphQL-API (`POST https://api.buffer.com`, exakt nach
@@ -220,24 +164,24 @@ Ablauf pro Video:
 4. **Status:** `posts`-Query pollen (scheduled → sent/error); Teilfehler
    einzelner Kanäle werden pro Ziel gemeldet, nie als Erfolg maskiert.
 
-**Voreinstellungen sind geteilt:** Plattformen, Modus, Caption, Hashtags und
-Plan-Zeiten gelten für beide Dienste — nur das Kanal-Mapping je Plattform
-ist pro Dienst getrennt (Postlake-`accountIds` vs. Buffer-`bufferAccountIds`).
-Ohne Key wird auch hier lokal zwischengespeichert statt zu scheitern.
+**Voreinstellungen:** Plattformen, Kanal-Mapping je Plattform
+(`bufferAccountIds`), Modus, Caption, Hashtags und Plan-Zeiten gelten für
+POST und POST ALL; der Autopilot hat eigene Einstellungen in seinem Panel.
+Ohne Key wird lokal zwischengespeichert statt zu scheitern.
 
 ### Autopilot (Auto-Modus)
 
 Ein Klick auf **Autopilot starten** — danach läuft alles **ohne Nachfrage und
-ohne Klick** (Versandweg: im Panel **BUFFER oder POSTLAKE** wählbar): Titel sichern (fehlende schreibt die KI), Scripts + Voices,
-Rendern, jedes fertige Video im Stunden-Limit an Postlake schicken, nächste
+ohne Klick**: Titel sichern (fehlende schreibt die KI), Scripts + Voices,
+Rendern, jedes fertige Video im Stunden-Limit an Buffer schicken, nächste
 Runde mit frischen Ideen und neu geslicten Clips. Stopp nur per **STOP**.
 
 * **Limit (voreingestellt): 10 Videos/Stunde, frei 1–100** — drosselt den
-  Postlake-Versand (gleichmäßiger Abstand + hartes 60-Min-Fenster); gerendert
+  Buffer-Versand (gleichmäßiger Abstand + hartes 60-Min-Fenster); gerendert
   wird durchgehend, der Rest wartet in der Queue (Rückstau-Schutz bei 30).
 * **Modi:** Sofort posten oder Slots planen (06:00 & 20:00 Berlin).
 * **Robustheit:** 3 Versuche pro Video, Protokoll im Panel, Live-Status-Polling,
-  Credit-Warnung, Wake-Lock gegen Display-Schlaf.
+  Wake-Lock gegen Display-Schlaf.
 * **Voraussetzungen:** Footage geladen (Titel optional), **Tab muss offen bleiben**
   (Echtzeit-Canvas-Rendering), Kanäle + Key für Live-Versand (ohne beides wird
   lokal zwischengespeichert, nichts geht verloren).
@@ -305,7 +249,7 @@ Same origin → no CORS, no apikey, no Supabase anon key, no configuration.
 | Captions | WordBoundary timestamps grouped into N-word cues, drawn on canvas |
 | Rendering | Canvas 2D + WebAudio graph + MediaRecorder, real-time capture, MP4/H.264 on Safari with automatic WebM fallback |
 | ZIP | JSZip (STORE) → blob anchor, fully local |
-| Posting | Browser → same-origin `/api/postlake` (Node) ⇄ Postlake REST (`/v1/media`, `/v1/posts`, `/v1/analytics`) — key stays server-side, uploads via signed PUT URLs |
+| Posting | Browser → same-origin `/api/buffer` (Node) ⇄ Buffer GraphQL (`createPost`, `posts`) — key stays server-side, videos hosted in the public Supabase `renders` bucket |
 | Autopilot | In-browser loop: ideas → prepare → render → throttled dispatch (1–100/h) → next round, zero clicks |
 | Your files | Never uploaded — read straight from device memory (except the videos you post) |
 
@@ -316,7 +260,7 @@ tab must stay in the foreground (that's how MediaRecorder captures frames).
 
 ```
 src/
-├─ App.tsx                     orchestrator: prepare → render → zip → buffer/postlake · autopilot loops
+├─ App.tsx                     orchestrator: prepare → render → zip → buffer · autopilot loops
 ├─ components/
 │  ├─ Header.tsx               LEDs, clock, marquee
 │  ├─ SettingsPanel.tsx        5-tab settings console
@@ -325,24 +269,21 @@ src/
 │  ├─ ClipMill.tsx             1-source slicing + link intake + 10-file mode
 │  ├─ Uploaders.tsx            soundtrack deck
 │  ├─ MissionControl.tsx       prepare/render buttons · unit cards · ZIP bay · post all
-│  ├─ AutopilotPanel.tsx       auto-mode console: provider · limit 1–100/h, stats, event log
-│  ├─ PostlakeAccounts.tsx     postlake channels + credits + shared post-all prefs (+ dashboard)
-│  ├─ BufferAccounts.tsx       buffer channels + org + shared prefs (own channel mapping)
-│  ├─ DispatchChooser.tsx      post-button dialog: pick BUFFER or POSTLAKE per click
-│  ├─ PostlakeCalendar.tsx     month/week/day calendar · both providers · reschedule · cancel
-│  └─ PostlakeAnalytics.tsx    roll-up metrics + top-posts chart (postlake)
+│  ├─ AutopilotPanel.tsx       auto-mode console: limit 1–100/h, stats, event log
+│  ├─ DashboardStats.tsx       dashboard header: today · planned · published · hourly limit
+│  ├─ BufferAccounts.tsx       buffer channels + org + post-all prefs (channel mapping)
+│  └─ PostsCalendar.tsx        month/week/day calendar · reschedule · cancel
 └─ lib/
    ├─ settings.ts   llm.ts   tts.ts   renderer.ts   clips.ts   media.ts   types.ts
-   ├─ postlake.ts   postlake client: prefs, slots, posts, analytics (via /api/postlake)
-   ├─ buffer.ts     buffer client: channels, posts via /api/buffer (shared cache+slots)
-   ├─ dispatch.ts   dispatch provider pick (postlake|buffer) + persistence
-   ├─ autopilot.ts  auto-mode config (provider!), hourly throttle, dispatch log, stats
-   └─ upload.ts     signed-PUT uploads to Postlake · supabase hosting for Buffer
+   ├─ posts.ts      provider-neutral core: post types, local cache, prefs, slots, display helpers
+   ├─ buffer.ts     buffer client: channels, posts via /api/buffer (cache+slots)
+   ├─ autopilot.ts  auto-mode config, hourly throttle, dispatch log, stats
+   └─ upload.ts     supabase hosting for Buffer (public video URLs)
 
-api/        ← tts relay + postlake route + buffer route + gate (Vercel Serverless, Node.js runtime)
+api/        ← tts relay + buffer route + gate (Vercel Serverless, Node.js runtime)
 server/     ← gate-core.js: geteilte Gate-Logik (Password-Check, HMAC-Session, 401-Guard)
 supabase/   ← inert legacy v1 (hosted Edge Functions + Shotstack), unused
-            (nur der „renders"-Bucket lebt: Postlake-Fallback + Buffer-Pflicht-Hosting)
+            (nur der „renders"-Bucket lebt: Buffer-Pflicht-Hosting)
 ```
 
 — No ffmpeg. No mercy.
