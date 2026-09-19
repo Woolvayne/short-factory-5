@@ -1,271 +1,64 @@
 /**
- * Buffer client (frontend side).
+ * Buffer-Client (Frontend).
  *
- * Talks exclusively to the same-origin /api/buffer route — the BUFFER_API_KEY
- * lives on the server and never reaches this bundle. Results are mirrored into
- * localStorage so the calendar/dashboard still render when the key is missing
- * or the network is down; Buffer stays the source of truth whenever reachable.
+ * Spricht ausschließlich mit der Route /api/buffer — der BUFFER_API_KEY
+ * bleibt auf dem Server und erreicht dieses Bundle nie.
+ *
+ * Unterschiede zu Postlake (laut developers.buffer.com):
+ * - GraphQL, genau EINE channelId pro createPost-Mutation (der Server
+ *   fächert 1 Video × N Kanäle in N Mutationen auf).
+ * - KEIN Medien-Upload: Videos müssen unter einer öffentlichen, stabilen
+ *   HTTPS-URL liegen → Supabase-„renders"-Bucket (siehe upload.ts).
+ * - YouTube braucht title + categoryId, Instagram braucht type: reel.
+ * - Planen = mode customScheduled + dueAt (ISO UTC, Zukunft);
+ *   sofort = mode shareNow.
+ *
+ * Ergebnisse landen im SELBEN localStorage-Spiegel wie Postlake-Posts
+ * (provider: „buffer"), damit Kalender & Dashboard beide Wege zeigen.
  */
 
-export type BufferMode = "shareNow" | "addToQueue" | "customScheduled";
+import {
+  loadCachedPosts,
+  saveCachedPosts,
+  wallTimeToISO,
+  type LakeAccount,
+  type LakePost,
+  type LakeState,
+  type LakeTarget,
+  type PostStatus,
+  type SocialPlatform,
+} from "./postlake";
 
-export type PostStatus =
-  | "Geplant"
-  | "Wird verarbeitet"
-  | "Veröffentlicht"
-  | "Fehler"
-  | "Entwurf";
+export const BUFFER_DASHBOARD = "https://publish.buffer.com";
+export const BUFFER_API_SETTINGS = "https://publish.buffer.com/settings/api";
 
-export interface BufferChannel {
-  id: string;
-  name: string;
-  service: string;
-  username?: string;
-  avatar?: string;
-  connected: boolean;
-  locked?: boolean;
-}
+/* ------------------------------------------------------------------ */
+/*  Status-Mapping Buffer → UI                                          */
+/* ------------------------------------------------------------------ */
 
-export interface BufferPost {
-  id: string;
-  bufferPostId?: string | null;
-  text: string;
-  title: string;
-  caption?: string;
-  hashtags?: string[];
+export function mapBufferState(s: string | undefined | null): {
+  state: LakeState;
   status: PostStatus;
-  scheduledAt: string;
-  channelId: string;
-  channelName?: string;
-  service?: string;
-  avatar?: string;
-  videoUrl?: string;
-  thumbnailUrl?: string;
-  errorMessage?: string | null;
-  metrics?: Record<string, number>;
-  views?: number;
-  likes?: number;
-  comments?: number;
-  shares?: number;
-  engagement?: number;
-  createdAt?: string;
-  updatedAt?: string;
-  /** true when the post only exists locally (no Buffer key configured) */
-  local?: boolean;
-}
-
-export interface AnalyticsTotals {
-  views: number;
-  impressions: number;
-  reach: number;
-  likes: number;
-  comments: number;
-  shares: number;
-  posts: number;
-  engagementRate: number;
-}
-
-const POSTS_KEY = "shortsfactory.buffer_posts.v1";
-const PREFS_KEY = "shortsfactory.buffer_prefs.v1";
-
-export interface BufferPrefs {
-  /** channel ids selected by default in the post editor */
-  selectedChannelIds: string[];
-  /** fixed engagement caption used for every post unless the user overrides it */
-  defaultCaption: string;
-  defaultHashtags: string;
-  /** automatic planner */
-  postsPerDay: number;
-  preferredTimes: string[];
-  planDays: number;
-  timezone: string;
-}
-
-export const DEFAULT_PREFS: BufferPrefs = {
-  selectedChannelIds: [],
-  defaultCaption:
-    "You won't believe how this story ends...\nStay until the end because the plot twist is INSANE.\nWould you have done the same?",
-  defaultHashtags: "#reddit #redditstories #storytime #stories #fyp",
-  postsPerDay: 2,
-  preferredTimes: ["06:00", "20:00"],
-  planDays: 5,
-  timezone: "Europe/Berlin",
-};
-
-export function loadPrefs(): BufferPrefs {
-  try {
-    const raw = localStorage.getItem(PREFS_KEY);
-    if (!raw) return { ...DEFAULT_PREFS };
-    return { ...DEFAULT_PREFS, ...JSON.parse(raw) };
-  } catch {
-    return { ...DEFAULT_PREFS };
+} {
+  const v = String(s || "").toLowerCase();
+  if (["sent", "published", "delivered", "success"].includes(v)) {
+    return { state: "published", status: "Veröffentlicht" };
   }
-}
-
-export function savePrefs(p: BufferPrefs): void {
-  try {
-    localStorage.setItem(PREFS_KEY, JSON.stringify(p));
-  } catch {
-    /* private mode */
+  if (["error", "failed", "failure"].includes(v)) {
+    return { state: "failed", status: "Fehler" };
   }
-}
-
-export function loadCachedPosts(): BufferPost[] {
-  try {
-    const raw = localStorage.getItem(POSTS_KEY);
-    const parsed = raw ? JSON.parse(raw) : [];
-    return Array.isArray(parsed) ? parsed : [];
-  } catch {
-    return [];
+  if (["draft"].includes(v)) {
+    return { state: "draft", status: "Entwurf" };
   }
-}
-
-export function saveCachedPosts(posts: BufferPost[]): void {
-  try {
-    localStorage.setItem(POSTS_KEY, JSON.stringify(posts.slice(0, 500)));
-  } catch {
-    /* quota */
+  if (["publishing", "processing", "sending"].includes(v)) {
+    return { state: "processing", status: "Wird veröffentlicht" };
   }
+  // buffer / scheduled / queued / pending / service / default → geplant
+  return { state: "scheduled", status: "Geplant" };
 }
 
 /* ------------------------------------------------------------------ */
-/*  Timezone helpers (default Europe/Berlin)                            */
-/* ------------------------------------------------------------------ */
-
-export function tzParts(date: Date, timeZone = "Europe/Berlin") {
-  const fmt = new Intl.DateTimeFormat("en-CA", {
-    timeZone,
-    year: "numeric",
-    month: "2-digit",
-    day: "2-digit",
-    hour: "2-digit",
-    minute: "2-digit",
-    hour12: false,
-  });
-  const map: Record<string, string> = {};
-  for (const p of fmt.formatToParts(date)) {
-    if (p.type !== "literal") map[p.type] = p.value;
-  }
-  return {
-    year: Number(map.year),
-    month: Number(map.month),
-    day: Number(map.day),
-    hour: Number(map.hour === "24" ? "0" : map.hour),
-    minute: Number(map.minute),
-  };
-}
-
-/** Convert a wall-clock time in `timeZone` into a UTC ISO string. */
-export function wallTimeToISO(
-  year: number,
-  month: number,
-  day: number,
-  hour: number,
-  minute = 0,
-  timeZone = "Europe/Berlin"
-): string {
-  const approx = new Date(Date.UTC(year, month - 1, day, hour, minute, 0));
-  const actual = tzParts(approx, timeZone);
-  let diff = hour * 60 + minute - (actual.hour * 60 + actual.minute);
-  if (diff > 720) diff -= 1440;
-  if (diff < -720) diff += 1440;
-  return new Date(approx.getTime() + diff * 60_000).toISOString();
-}
-
-export function slotKey(iso: string, timeZone = "Europe/Berlin"): string {
-  const d = new Date(iso);
-  if (isNaN(d.getTime())) return "";
-  const p = tzParts(d, timeZone);
-  const pad = (n: number) => String(n).padStart(2, "0");
-  return `${p.year}-${pad(p.month)}-${pad(p.day)} ${pad(p.hour)}:${pad(p.minute)}`;
-}
-
-export function formatDateTime(iso: string, timeZone = "Europe/Berlin") {
-  const d = new Date(iso);
-  if (isNaN(d.getTime())) return { date: "—", time: "—", weekday: "—", full: "—" };
-  const date = new Intl.DateTimeFormat("de-DE", {
-    timeZone,
-    day: "2-digit",
-    month: "2-digit",
-    year: "numeric",
-  }).format(d);
-  const time = new Intl.DateTimeFormat("de-DE", {
-    timeZone,
-    hour: "2-digit",
-    minute: "2-digit",
-  }).format(d);
-  const weekday = new Intl.DateTimeFormat("de-DE", { timeZone, weekday: "short" }).format(d);
-  return { date, time: `${time} Uhr`, weekday, full: `${weekday}, ${date} · ${time} Uhr` };
-}
-
-export function dateKey(d: Date, timeZone = "Europe/Berlin"): string {
-  const p = tzParts(d, timeZone);
-  const pad = (n: number) => String(n).padStart(2, "0");
-  return `${p.year}-${pad(p.month)}-${pad(p.day)}`;
-}
-
-const parseTime = (t: string): [number, number] => {
-  const m = /^(\d{1,2}):(\d{2})$/.exec(t.trim());
-  if (!m) return [6, 0];
-  return [Math.min(23, Math.max(0, +m[1])), Math.min(59, Math.max(0, +m[2]))];
-};
-
-/**
- * Automatic planner: walks forward day by day, offering `preferredTimes`
- * (capped at `postsPerDay` per day) and skipping every slot that is already
- * occupied by an existing post. Never double-books.
- */
-export function planAutoSlots(
-  existing: BufferPost[],
-  opts: {
-    count: number;
-    preferredTimes: string[];
-    postsPerDay: number;
-    planDays?: number;
-    startDate?: string;
-    timezone?: string;
-  }
-): { scheduledAt: string; key: string }[] {
-  const tz = opts.timezone || "Europe/Berlin";
-  const times = (opts.preferredTimes.length ? opts.preferredTimes : ["06:00", "20:00"])
-    .map(parseTime)
-    .sort((a, b) => a[0] * 60 + a[1] - (b[0] * 60 + b[1]));
-  const perDay = Math.max(1, Math.min(opts.postsPerDay || times.length, times.length));
-
-  const occupied = new Set(
-    existing.filter((p) => p?.scheduledAt).map((p) => slotKey(p.scheduledAt, tz))
-  );
-
-  const now = new Date();
-  let anchor = tzParts(now, tz);
-  if (opts.startDate) {
-    const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(opts.startDate);
-    if (m) anchor = { ...anchor, year: +m[1], month: +m[2], day: +m[3] };
-  }
-
-  const out: { scheduledAt: string; key: string }[] = [];
-  const maxDays = Math.max(opts.planDays || 5, 1) * 12; // keep searching past the window
-  for (let dayIdx = 0; dayIdx < maxDays && out.length < opts.count; dayIdx++) {
-    const base = new Date(Date.UTC(anchor.year, anchor.month - 1, anchor.day + dayIdx, 12, 0, 0));
-    const b = tzParts(base, tz);
-    let usedToday = 0;
-
-    for (const [h, mi] of times) {
-      if (out.length >= opts.count || usedToday >= perDay) break;
-      const iso = wallTimeToISO(b.year, b.month, b.day, h, mi, tz);
-      if (new Date(iso).getTime() <= now.getTime() + 120_000) continue;
-      const key = slotKey(iso, tz);
-      if (occupied.has(key)) continue;
-      occupied.add(key);
-      out.push({ scheduledAt: iso, key });
-      usedToday++;
-    }
-  }
-  return out;
-}
-
-/* ------------------------------------------------------------------ */
-/*  API calls                                                           */
+/*  API-Aufrufe (alle über /api/buffer)                                 */
 /* ------------------------------------------------------------------ */
 
 async function call<T>(payload: Record<string, unknown>): Promise<T & { ok: boolean; error?: string }> {
@@ -277,178 +70,255 @@ async function call<T>(payload: Record<string, unknown>): Promise<T & { ok: bool
   return (await res.json()) as T & { ok: boolean; error?: string };
 }
 
-export async function fetchChannels(): Promise<{
-  channels: BufferChannel[];
+export interface BufferOrganization {
+  id: string;
+  name: string;
+}
+
+export interface BufferStatus {
   hasApiKey: boolean;
-  error?: string;
-}> {
+  apiStatus: "connected" | "missing_key" | "invalid_key" | "unreachable";
+  me: { email?: string; name?: string } | null;
+  organizations: BufferOrganization[];
+  accounts: LakeAccount[];
+  keyError?: string;
+}
+
+export async function fetchBufferStatus(): Promise<BufferStatus> {
   try {
-    const res = await fetch("/api/buffer");
+    const res = await fetch("/api/buffer?action=status");
     const data = await res.json();
     return {
-      channels: Array.isArray(data.channels) ? data.channels : [],
-      hasApiKey: Boolean(data.hasApiKey),
-      error: data.error,
+      hasApiKey: Boolean(data?.hasApiKey),
+      apiStatus: data?.apiStatus || "missing_key",
+      me: data?.me ?? null,
+      organizations: Array.isArray(data?.organizations) ? data.organizations : [],
+      accounts: Array.isArray(data?.accounts) ? data.accounts : [],
+      keyError: data?.keyError,
     };
-  } catch (e) {
-    return { channels: [], hasApiKey: false, error: e instanceof Error ? e.message : String(e) };
-  }
-}
-
-/** Buffer is the source of truth; local-only posts are merged in beneath it. */
-export async function fetchPosts(): Promise<{
-  posts: BufferPost[];
-  channels: BufferChannel[];
-  hasApiKey: boolean;
-  error?: string;
-}> {
-  const cached = loadCachedPosts();
-  try {
-    const data = await call<{
-      posts: BufferPost[];
-      channels: BufferChannel[];
-      hasApiKey: boolean;
-    }>({ action: "posts" });
-
-    if (data.ok && Array.isArray(data.posts)) {
-      const remoteIds = new Set(data.posts.map((p) => p.bufferPostId || p.id));
-      const localExtras = cached.filter((p) => p.local && !remoteIds.has(p.bufferPostId || p.id));
-      /* keep locally stored media/hashtags attached to their Buffer twins */
-      const enriched = data.posts.map((p) => {
-        const twin = cached.find((c) => (c.bufferPostId || c.id) === (p.bufferPostId || p.id));
-        return twin ? { ...twin, ...p, videoUrl: twin.videoUrl, thumbnailUrl: twin.thumbnailUrl } : p;
-      });
-      const merged = [...enriched, ...localExtras].sort(
-        (a, b) => new Date(a.scheduledAt).getTime() - new Date(b.scheduledAt).getTime()
-      );
-      saveCachedPosts(merged);
-      return { posts: merged, channels: data.channels || [], hasApiKey: true };
-    }
-    return { posts: cached, channels: [], hasApiKey: Boolean(data.hasApiKey), error: data.error };
   } catch (e) {
     return {
-      posts: cached,
-      channels: [],
       hasApiKey: false,
-      error: e instanceof Error ? e.message : String(e),
+      apiStatus: "unreachable",
+      me: null,
+      organizations: [],
+      accounts: [],
+      keyError: e instanceof Error ? e.message : String(e),
     };
   }
-}
-
-export interface CreateJob {
-  localId: string;
-  channelId: string;
-  channelName?: string;
-  service?: string;
-  text: string;
-  title: string;
-  caption: string;
-  hashtags: string[];
-  mode: BufferMode;
-  dueAt?: string;
-  mediaUrl?: string;
-  thumbnailUrl?: string;
 }
 
 /**
- * Fan out one post per selected channel. Returns the resulting posts with
- * per-channel success/error state — failures never masquerade as success.
+ * Löst je gewünschter Plattform genau 1 Buffer-Kanal-ID auf:
+ * gespeicherte Auswahl zuerst, sonst erster verbundener Kanal.
  */
-export async function createPosts(jobs: CreateJob[]): Promise<{
-  posts: BufferPost[];
+export function resolveBufferChannelIds(
+  platforms: SocialPlatform[],
+  accounts: LakeAccount[],
+  overrides: Partial<Record<SocialPlatform, string>>
+): { ids: string[]; missing: SocialPlatform[]; byPlatform: Partial<Record<SocialPlatform, string>> } {
+  const ids: string[] = [];
+  const missing: SocialPlatform[] = [];
+  const byPlatform: Partial<Record<SocialPlatform, string>> = {};
+  for (const p of platforms) {
+    const wanted = (overrides[p] || "").trim();
+    const hit =
+      (wanted && accounts.find((a) => a.id === wanted)) ||
+      accounts.find((a) => a.platform === p && a.status !== "disconnected") ||
+      accounts.find((a) => a.platform === p);
+    if (hit) {
+      ids.push(hit.id);
+      byPlatform[p] = hit.id;
+    } else {
+      missing.push(p);
+    }
+  }
+  return { ids, missing, byPlatform };
+}
+
+export interface BufferCreateJob {
+  localId: string;
+  text: string;
+  title: string;
+  hashtags: string[];
+  channelIds: string[];
+  videoUrl: string;
+  previewUrl?: string;
+  /** ISO UTC (Feuerzeitpunkt) — nur bei „Planen" gesetzt */
+  scheduledAtISO?: string;
+  timezone?: string;
+  idempotencyKey: string;
+}
+
+interface BufferRemotePost {
+  id: string;
+  channelId: string;
+  platform: string;
+  dueAt: string;
+  createdAt: string;
+  status: string;
+  text: string;
+}
+
+interface BufferCreateResult {
+  ok: boolean;
+  localId: string;
+  posts?: BufferRemotePost[];
+  errors?: { channelId: string; platform: string; error: string }[];
+  scheduled?: boolean;
+  videoUrl?: string | null;
+  error?: string;
+}
+
+/** Lokaler LakePost-Spiegel für einen Buffer-Job (Offline-/No-Key-Fallback). */
+export function makeBufferLocalPost(job: BufferCreateJob, nowIso = new Date().toISOString()): LakePost {
+  const scheduledAt = job.scheduledAtISO || nowIso;
+  return {
+    id: job.localId,
+    postlakeId: null,
+    text: job.text,
+    title: job.title,
+    hashtags: job.hashtags,
+    mediaIds: [],
+    previewUrl: job.previewUrl,
+    accounts: job.channelIds,
+    platforms: [],
+    state: job.scheduledAtISO ? "scheduled" : "processing",
+    status: job.scheduledAtISO ? "Geplant" : "Wird veröffentlicht",
+    scheduledAt,
+    timezone: job.timezone || "Europe/Berlin",
+    targets: job.channelIds.map((a) => ({ account: a, platform: "", state: "queued" })),
+    idempotencyKey: job.idempotencyKey,
+    createdAt: nowIso,
+    updatedAt: nowIso,
+    local: true,
+    provider: "buffer",
+    bufferPostIds: [],
+    videoUrl: job.videoUrl,
+  };
+}
+
+function mergeBufferRemote(base: LakePost, remotes: BufferRemotePost[]): LakePost {
+  const nowIso = new Date().toISOString();
+  const targets: LakeTarget[] = remotes.map((r) => {
+    const { state } = mapBufferState(r.status);
+    return { account: r.channelId, platform: r.platform, state };
+  });
+  // Schlimmster Status gewinnt (Fehler > Wird veröffentlicht > Geplant > Veröffentlicht)
+  const rank = (s: PostStatus) =>
+    s === "Fehler" ? 4 : s === "Wird veröffentlicht" ? 3 : s === "Geplant" ? 2 : s === "Entwurf" ? 1 : 0;
+  let best: PostStatus = "Veröffentlicht";
+  let bestState: LakeState = "published";
+  for (const r of remotes) {
+    const m = mapBufferState(r.status);
+    if (rank(m.status) > rank(best)) {
+      best = m.status;
+      bestState = m.state;
+    }
+  }
+  const firstDue = remotes.map((r) => r.dueAt).filter(Boolean).sort()[0];
+  return {
+    ...base,
+    bufferPostIds: remotes.map((r) => r.id),
+    accounts: remotes.map((r) => r.channelId),
+    platforms: [...new Set(remotes.map((r) => r.platform).filter(Boolean))],
+    targets,
+    state: bestState,
+    status: best,
+    scheduledAt: firstDue || base.scheduledAt,
+    updatedAt: nowIso,
+    local: false,
+  };
+}
+
+/**
+ * Postet 1..N Videos über Buffer (Server fächert je Kanal auf).
+ * Legt lokale LakePost-Spiegel an und mergt Remote-Antworten ein.
+ */
+export async function createBufferPosts(jobs: BufferCreateJob[]): Promise<{
+  posts: LakePost[];
   created: number;
   failed: number;
   hasApiKey: boolean;
   error?: string;
 }> {
+  const cached = loadCachedPosts();
   const nowIso = new Date().toISOString();
-
-  const toPost = (
-    job: CreateJob,
-    over: Partial<BufferPost> = {}
-  ): BufferPost => ({
-    id: job.localId,
-    bufferPostId: null,
-    text: job.text,
-    title: job.title,
-    caption: job.caption,
-    hashtags: job.hashtags,
-    status: job.mode === "shareNow" ? "Wird verarbeitet" : "Geplant",
-    scheduledAt: job.dueAt || nowIso,
-    channelId: job.channelId,
-    channelName: job.channelName,
-    service: job.service,
-    videoUrl: job.mediaUrl,
-    thumbnailUrl: job.thumbnailUrl,
-    errorMessage: null,
-    createdAt: nowIso,
-    updatedAt: nowIso,
-    local: true,
-    ...over,
-  });
 
   try {
     const data = await call<{
-      results: {
-        ok: boolean;
-        localId: string;
-        channelId: string;
-        bufferPostId?: string;
-        status?: PostStatus;
-        dueAt?: string;
-        error?: string;
-      }[];
+      results: BufferCreateResult[];
       created: number;
       failed: number;
       hasApiKey: boolean;
-    }>({ action: "createBatch", jobs });
+    }>({ action: "create-batch", jobs });
 
+    // Kein Key auf dem Server → alles lokal behalten, nichts geht verloren.
     if (!data.ok && data.hasApiKey === false) {
-      /* No key on the server: keep everything locally so nothing is lost. */
-      const posts = jobs.map((j) => toPost(j));
-      const merged = [...loadCachedPosts(), ...posts];
+      const locals = jobs.map((j) => makeBufferLocalPost(j, nowIso));
+      const merged = [...locals, ...cached].slice(0, 500);
       saveCachedPosts(merged);
-      return {
-        posts: merged,
-        created: posts.length,
-        failed: 0,
-        hasApiKey: false,
-        error: data.error,
-      };
+      return { posts: merged, created: 0, failed: 0, hasApiKey: false, error: data.error };
     }
 
-    const results = data.results || [];
     const posts = jobs.map((job) => {
-      const r = results.find((x) => x.localId === job.localId);
-      if (!r) return toPost(job, { status: "Fehler", errorMessage: "Keine Antwort von Buffer." });
-      if (!r.ok) return toPost(job, { status: "Fehler", errorMessage: r.error || "Buffer-Fehler." });
-      return toPost(job, {
-        bufferPostId: r.bufferPostId,
-        status: r.status || (job.mode === "shareNow" ? "Wird verarbeitet" : "Geplant"),
-        scheduledAt: r.dueAt || job.dueAt || nowIso,
-        local: false,
-      });
+      const base = makeBufferLocalPost(job, nowIso);
+      const r = (data.results || []).find((x) => x.localId === job.localId);
+      if (!r) {
+        return {
+          ...base,
+          state: "failed" as LakeState,
+          status: "Fehler" as PostStatus,
+          errorMessage: "Keine Antwort von Buffer.",
+          local: false,
+        };
+      }
+      if (!r.ok || !r.posts || r.posts.length === 0) {
+        return {
+          ...base,
+          state: "failed" as LakeState,
+          status: "Fehler" as PostStatus,
+          errorMessage: r.error || "Buffer-Fehler.",
+          local: false,
+        };
+      }
+      const merged = mergeBufferRemote(base, r.posts);
+      // Teilfehler (einzelne Kanäle scheiterten) sichtbar machen
+      if (r.errors && r.errors.length > 0) {
+        const msg = r.errors.map((e) => `[${e.platform}] ${e.error}`).join(" · ");
+        if (merged.status === "Veröffentlicht") {
+          merged.state = "partial";
+          merged.status = "Teils veröffentlicht";
+        }
+        merged.errorMessage = msg;
+        for (const e of r.errors) {
+          merged.targets.push({
+            account: e.channelId,
+            platform: e.platform,
+            state: "failed",
+            error: e.error,
+          });
+        }
+      }
+      return merged;
     });
 
-    const merged = [...loadCachedPosts(), ...posts].sort(
-      (a, b) => new Date(a.scheduledAt).getTime() - new Date(b.scheduledAt).getTime()
-    );
-    saveCachedPosts(merged);
-
+    const mergedAll = [...posts, ...cached].slice(0, 500);
+    saveCachedPosts(mergedAll);
     return {
-      posts: merged,
+      posts: mergedAll,
       created: data.created ?? posts.filter((p) => p.status !== "Fehler").length,
       failed: data.failed ?? posts.filter((p) => p.status === "Fehler").length,
       hasApiKey: true,
       error: data.error,
     };
   } catch (e) {
-    const posts = jobs.map((j) => toPost(j));
-    const merged = [...loadCachedPosts(), ...posts];
+    const locals = jobs.map((j) => makeBufferLocalPost(j, nowIso));
+    const merged = [...locals, ...cached].slice(0, 500);
     saveCachedPosts(merged);
     return {
       posts: merged,
-      created: posts.length,
+      created: 0,
       failed: 0,
       hasApiKey: false,
       error: e instanceof Error ? e.message : String(e),
@@ -456,12 +326,127 @@ export async function createPosts(jobs: CreateJob[]): Promise<{
   }
 }
 
-export async function deletePost(post: BufferPost): Promise<BufferPost[]> {
-  if (post.bufferPostId && !post.local) {
+/** Offene Buffer-Posts pollen und mergen (1 Spiegel = N Kanal-Posts). */
+export async function refreshOpenBufferPosts(): Promise<{ posts: LakePost[]; refreshed: number }> {
+  const cached = loadCachedPosts();
+  const open = cached.filter(
+    (p) =>
+      p.provider === "buffer" &&
+      p.bufferPostIds &&
+      p.bufferPostIds.length > 0 &&
+      ["Geplant", "Wird veröffentlicht", "Entwurf"].includes(p.status)
+  );
+  if (open.length === 0) return { posts: cached, refreshed: 0 };
+  try {
+    const ids = [...new Set(open.flatMap((p) => p.bufferPostIds || []))].slice(0, 50);
+    const data = await call<{ posts: BufferRemotePost[] }>({ action: "refresh", ids });
+    if (!data.ok || !Array.isArray(data.posts)) return { posts: cached, refreshed: 0 };
+    const byId = new Map(data.posts.map((r) => [r.id, r]));
+    let refreshed = 0;
+    const merged = cached.map((p) => {
+      if (p.provider !== "buffer" || !p.bufferPostIds?.length) return p;
+      const remotes = p.bufferPostIds
+        .map((id) => byId.get(id))
+        .filter((r): r is BufferRemotePost => Boolean(r));
+      if (remotes.length === 0) return p;
+      refreshed++;
+      return mergeBufferRemote(p, remotes);
+    });
+    saveCachedPosts(merged);
+    return { posts: merged, refreshed };
+  } catch {
+    return { posts: cached, refreshed: 0 };
+  }
+}
+
+/**
+ * Buffer-Postliste holen und mit dem Cache mergen.
+ * Postlake-Posts bleiben unangetastet; lokale Buffer-Entwürfe auch.
+ */
+export async function syncBufferPosts(opts?: { limit?: number }): Promise<{
+  posts: LakePost[];
+  hasApiKey: boolean;
+  error?: string;
+}> {
+  const cached = loadCachedPosts();
+  try {
+    const data = await call<{ posts: BufferRemotePost[] }>({
+      action: "list-posts",
+      limit: opts?.limit ?? 100,
+    });
+    if (!data.ok || !Array.isArray(data.posts)) {
+      return { posts: cached, hasApiKey: true, error: data.error };
+    }
+    const nowIso = new Date().toISOString();
+    // Buffer liefert 1 Zeile pro Kanal-Post → zu Spiegeln gruppieren.
+    // Zuerst nach lokalem Zwilling (stabile bufferPostIds), sonst nach Text+Zeit.
+    const byBufferId = new Map<string, LakePost>();
+    for (const p of cached) {
+      if (p.provider !== "buffer") continue;
+      for (const bid of p.bufferPostIds || []) byBufferId.set(bid, p);
+    }
+    const groups = new Map<string, BufferRemotePost[]>();
+    for (const r of data.posts) {
+      const twin = byBufferId.get(r.id);
+      const key = twin ? `twin:${twin.id}` : `free:${r.text}__${r.dueAt}`;
+      if (!groups.has(key)) groups.set(key, []);
+      groups.get(key)!.push(r);
+    }
+    const synced: LakePost[] = [];
+    const seenTwin = new Set<string>();
+    for (const remotes of groups.values()) {
+      const twin = remotes.map((r) => byBufferId.get(r.id)).find(Boolean);
+      if (twin) {
+        if (seenTwin.has(twin.id)) continue; // derselbe Spiegel nur einmal
+        seenTwin.add(twin.id);
+      }
+      const first = remotes[0];
+      const base: LakePost = twin || {
+        id: `buf_${first.id}`,
+        postlakeId: null,
+        text: first.text,
+        title: String(first.text || "").split("\n")[0].slice(0, 90) || "Buffer-Post",
+        hashtags: [],
+        mediaIds: [],
+        previewUrl: undefined,
+        accounts: [],
+        platforms: [],
+        state: "scheduled",
+        status: "Geplant",
+        scheduledAt: first.dueAt,
+        timezone: "Europe/Berlin",
+        targets: [],
+        idempotencyKey: `buf_${first.id}`,
+        createdAt: first.createdAt,
+        updatedAt: nowIso,
+        local: false,
+        provider: "buffer",
+        bufferPostIds: [],
+      };
+      synced.push(mergeBufferRemote({ ...base, provider: "buffer" }, remotes));
+    }
+    // Alles Nicht-Buffer + lokale Buffer-Entwürfe bleiben erhalten
+    const keep = cached.filter(
+      (p) => p.provider !== "buffer" || !p.bufferPostIds || p.bufferPostIds.length === 0
+    );
+    const seen = new Set(synced.map((p) => p.id));
+    const merged = [...synced, ...keep.filter((p) => !seen.has(p.id))]
+      .sort((a, b) => +new Date(b.createdAt) - +new Date(a.createdAt))
+      .slice(0, 500);
+    saveCachedPosts(merged);
+    return { posts: merged, hasApiKey: true };
+  } catch (e) {
+    return { posts: cached, hasApiKey: false, error: e instanceof Error ? e.message : String(e) };
+  }
+}
+
+/** Buffer-Spiegel stornieren (alle Kanal-Posts löschen + lokal entfernen). */
+export async function cancelBufferPost(post: LakePost): Promise<LakePost[]> {
+  if (post.bufferPostIds && post.bufferPostIds.length > 0 && !post.local) {
     try {
-      await call({ action: "delete", postId: post.bufferPostId });
+      await call({ action: "cancel", ids: post.bufferPostIds });
     } catch {
-      /* fall through — still remove locally so the UI stays consistent */
+      /* trotzdem lokal entfernen */
     }
   }
   const next = loadCachedPosts().filter((p) => p.id !== post.id);
@@ -469,64 +454,42 @@ export async function deletePost(post: BufferPost): Promise<BufferPost[]> {
   return next;
 }
 
-export function updateCachedPost(id: string, patch: Partial<BufferPost>): BufferPost[] {
-  const next = loadCachedPosts().map((p) =>
-    p.id === id ? { ...p, ...patch, updatedAt: new Date().toISOString() } : p
-  );
-  saveCachedPosts(next);
-  return next;
-}
-
-export async function fetchAnalytics(days: number): Promise<{
-  totals: AnalyticsTotals | null;
-  posts: BufferPost[];
-  hasApiKey: boolean;
-  error?: string;
-}> {
+/** Buffer-Spiegel umbuchen (alle Kanal-Posts auf neues dueAt). */
+export async function rescheduleBufferPost(
+  post: LakePost,
+  naiveLocal: string,
+  timezone: string
+): Promise<{ posts: LakePost[]; error?: string }> {
+  const cached = loadCachedPosts();
+  const [d, t] = naiveLocal.split("T");
+  const [y, m, dd] = d.split("-").map(Number);
+  const [hh, mm] = (t || "06:00").split(":").map(Number);
+  const iso = wallTimeToISO(y, m, dd, hh, mm || 0, timezone);
+  const applyLocal = (p: LakePost) => ({
+    ...p,
+    scheduledAt: iso,
+    scheduledAtLocal: naiveLocal,
+    timezone,
+    state: "scheduled" as LakeState,
+    status: "Geplant" as PostStatus,
+    updatedAt: new Date().toISOString(),
+  });
+  if (!post.bufferPostIds || post.bufferPostIds.length === 0 || post.local) {
+    const next = cached.map((p) => (p.id === post.id ? applyLocal(p) : p));
+    saveCachedPosts(next);
+    return { posts: next };
+  }
   try {
-    const data = await call<{
-      totals: AnalyticsTotals;
-      posts: BufferPost[];
-      hasApiKey: boolean;
-    }>({ action: "analytics", days });
-    if (data.ok) {
-      return { totals: data.totals, posts: data.posts || [], hasApiKey: true };
-    }
-    return { totals: null, posts: [], hasApiKey: Boolean(data.hasApiKey), error: data.error };
+    const data = await call<{ updated: BufferRemotePost[] }>({
+      action: "edit",
+      ids: post.bufferPostIds,
+      patch: { dueAt: iso },
+    });
+    if (!data.ok) return { posts: cached, error: data.error };
+    const next = cached.map((p) => (p.id === post.id ? applyLocal(p) : p));
+    saveCachedPosts(next);
+    return { posts: next };
   } catch (e) {
-    return { totals: null, posts: [], hasApiKey: false, error: e instanceof Error ? e.message : String(e) };
+    return { posts: cached, error: e instanceof Error ? e.message : String(e) };
   }
 }
-
-/* ------------------------------------------------------------------ */
-/*  Presentation helpers                                                */
-/* ------------------------------------------------------------------ */
-
-export const SERVICE_LABELS: Record<string, { label: string; icon: string }> = {
-  tiktok: { label: "TikTok", icon: "🎵" },
-  instagram: { label: "Instagram", icon: "📸" },
-  youtube: { label: "YouTube", icon: "▶️" },
-  facebook: { label: "Facebook", icon: "👥" },
-  twitter: { label: "X", icon: "✕" },
-  x: { label: "X", icon: "✕" },
-  linkedin: { label: "LinkedIn", icon: "💼" },
-  pinterest: { label: "Pinterest", icon: "📌" },
-  threads: { label: "Threads", icon: "🧵" },
-  bluesky: { label: "Bluesky", icon: "🦋" },
-  mastodon: { label: "Mastodon", icon: "🐘" },
-  googlebusiness: { label: "Google Business", icon: "🏢" },
-};
-
-export const serviceMeta = (service?: string) =>
-  SERVICE_LABELS[String(service || "").toLowerCase()] ?? { label: service || "Kanal", icon: "🌐" };
-
-export const STATUS_DOTS: Record<PostStatus, { dot: string; cls: string }> = {
-  Geplant: { dot: "🟡", cls: "border-amber-warn/50 bg-amber-warn/10 text-amber-warn" },
-  "Wird verarbeitet": { dot: "🔵", cls: "border-volt-400/50 bg-volt-400/10 text-volt-300" },
-  Veröffentlicht: { dot: "🟢", cls: "border-mint-400/50 bg-mint-400/10 text-mint-400" },
-  Fehler: { dot: "🔴", cls: "border-rose-err/60 bg-rose-err/10 text-rose-err" },
-  Entwurf: { dot: "⚪", cls: "border-coal-600 bg-coal-850 text-coal-300" },
-};
-
-export const compactNumber = (n: number) =>
-  new Intl.NumberFormat("de-DE", { notation: "compact", maximumFractionDigits: 1 }).format(n || 0);
