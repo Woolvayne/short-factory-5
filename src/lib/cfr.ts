@@ -26,19 +26,49 @@ import { toBlobURL, fetchFile } from "@ffmpeg/util";
 
 const CORE_BASE_URL = "https://unpkg.com/@ffmpeg/core@0.12.10/dist/umd";
 
+/* Ohne diese Timeouts kann ein einzelner hängender Schritt (CDN langsam/
+   blockiert beim Laden, oder minterpolate zu rechenintensiv bei 60fps auf
+   schwächeren Geräten) den Render-Fortschrittsbalken für IMMER blockieren —
+   und zwar nicht nur für dieses Video, sondern für jeden weiteren
+   Render-Versuch in derselben Sitzung, weil `ffmpegPromise` unten sonst nie
+   zurückgesetzt wird. */
+const LOAD_TIMEOUT_MS = 20_000;
+const INTERPOLATE_TIMEOUT_MS = 30_000;
+const PLAIN_ENCODE_TIMEOUT_MS = 60_000;
+
+function withTimeout<T>(promise: Promise<T>, ms: number, label: string): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    const timer = setTimeout(() => reject(new Error(`${label} timed out after ${ms}ms`)), ms);
+    promise.then(
+      (v) => {
+        clearTimeout(timer);
+        resolve(v);
+      },
+      (e) => {
+        clearTimeout(timer);
+        reject(e);
+      }
+    );
+  });
+}
+
 let ffmpegPromise: Promise<FFmpeg> | null = null;
 
 async function getFFmpeg(): Promise<FFmpeg> {
   if (!ffmpegPromise) {
-    ffmpegPromise = (async () => {
-      const ffmpeg = new FFmpeg();
-      await ffmpeg.load({
-        coreURL: await toBlobURL(`${CORE_BASE_URL}/ffmpeg-core.js`, "text/javascript"),
-        wasmURL: await toBlobURL(`${CORE_BASE_URL}/ffmpeg-core.wasm`, "application/wasm"),
-      });
-      return ffmpeg;
-    })().catch((e) => {
-      ffmpegPromise = null; // allow retrying on a later render
+    ffmpegPromise = withTimeout(
+      (async () => {
+        const ffmpeg = new FFmpeg();
+        await ffmpeg.load({
+          coreURL: await toBlobURL(`${CORE_BASE_URL}/ffmpeg-core.js`, "text/javascript"),
+          wasmURL: await toBlobURL(`${CORE_BASE_URL}/ffmpeg-core.wasm`, "application/wasm"),
+        });
+        return ffmpeg;
+      })(),
+      LOAD_TIMEOUT_MS,
+      "ffmpeg-core laden"
+    ).catch((e) => {
+      ffmpegPromise = null; // allow retrying on a later render, don't poison the cache forever
       throw e;
     });
   }
@@ -50,72 +80,110 @@ export async function forceConstantFrameRate(
   fps: number,
   onProgress?: (ratio: number) => void
 ): Promise<Blob> {
-  const ffmpeg = await getFFmpeg();
+  let ffmpeg = await getFFmpeg();
 
   const inName = "in" + (input.type.includes("webm") ? ".webm" : ".mp4");
   const outName = "out.mp4";
 
-  const progressHandler = ({ progress }: { progress: number }) => {
+  let progressHandler = ({ progress }: { progress: number }) => {
     if (Number.isFinite(progress)) onProgress?.(Math.max(0, Math.min(1, progress)));
   };
   ffmpeg.on("progress", progressHandler);
 
+  /* If a step times out below, the WASM worker may still be churning away
+     on it in the background — ffmpeg.wasm can only run one command at a
+     time, so reusing that same instance for a fallback attempt (or for
+     the *next* render) could hang or corrupt the result. Terminate and
+     start a fresh worker whenever a step times out. */
+  const restartWorker = async () => {
+    try {
+      ffmpeg.off("progress", progressHandler);
+      ffmpeg.terminate();
+    } catch { /* already gone */ }
+    ffmpegPromise = null;
+    ffmpeg = await getFFmpeg();
+    progressHandler = ({ progress }: { progress: number }) => {
+      if (Number.isFinite(progress)) onProgress?.(Math.max(0, Math.min(1, progress)));
+    };
+    ffmpeg.on("progress", progressHandler);
+    await ffmpeg.writeFile(inName, await fetchFile(input));
+  };
+
   try {
     await ffmpeg.writeFile(inName, await fetchFile(input));
     try {
-      await ffmpeg.exec([
-        "-i",
-        inName,
-        "-vf",
-        `minterpolate=fps=${fps}:mi_mode=blend`,
-        "-c:v",
-        "libx264",
-        "-profile:v",
-        "main",
-        "-pix_fmt",
-        "yuv420p",
-        "-c:a",
-        "aac",
-        "-b:a",
-        "128k",
-        "-movflags",
-        "+faststart",
-        outName,
-      ]);
+      await withTimeout(
+        ffmpeg.exec([
+          "-i",
+          inName,
+          "-vf",
+          `minterpolate=fps=${fps}:mi_mode=blend`,
+          "-c:v",
+          "libx264",
+          "-profile:v",
+          "main",
+          "-pix_fmt",
+          "yuv420p",
+          "-c:a",
+          "aac",
+          "-b:a",
+          "128k",
+          "-movflags",
+          "+faststart",
+          outName,
+        ]),
+        INTERPOLATE_TIMEOUT_MS,
+        "minterpolate-Encoding"
+      );
     } catch (e) {
       /* minterpolate can be too slow/memory-hungry for very long clips on
          weaker devices — fall back to a plain, guaranteed-CFR duplicate-
-         frame re-encode rather than losing the render entirely. Still
-         hits exactly `fps`, just without motion-blended smoothing. */
-      console.warn("minterpolate failed, falling back to plain CFR re-encode:", e);
-      await ffmpeg.exec([
-        "-i",
-        inName,
-        "-r",
-        String(fps),
-        "-vsync",
-        "cfr",
-        "-c:v",
-        "libx264",
-        "-profile:v",
-        "main",
-        "-pix_fmt",
-        "yuv420p",
-        "-c:a",
-        "aac",
-        "-b:a",
-        "128k",
-        "-movflags",
-        "+faststart",
-        outName,
-      ]);
+         frame re-encode on a fresh worker rather than losing the render
+         entirely. Still hits exactly `fps`, just without motion-blended
+         smoothing. */
+      console.warn("minterpolate failed or timed out, falling back to plain CFR re-encode:", e);
+      await restartWorker();
+      await withTimeout(
+        ffmpeg.exec([
+          "-i",
+          inName,
+          "-r",
+          String(fps),
+          "-vsync",
+          "cfr",
+          "-c:v",
+          "libx264",
+          "-profile:v",
+          "main",
+          "-pix_fmt",
+          "yuv420p",
+          "-c:a",
+          "aac",
+          "-b:a",
+          "128k",
+          "-movflags",
+          "+faststart",
+          outName,
+        ]),
+        PLAIN_ENCODE_TIMEOUT_MS,
+        "CFR-Encoding"
+      );
     }
     const data = await ffmpeg.readFile(outName);
     const bytes =
       data instanceof Uint8Array ? new Uint8Array(data) : new TextEncoder().encode(String(data));
     return new Blob([bytes], { type: "video/mp4" });
+  } catch (e) {
+    /* Whatever failed, make sure the *next* render doesn't inherit a
+       possibly-still-busy worker. */
+    await restartWorker().catch(() => {
+      /* restart itself failed too — next call's getFFmpeg() will retry from scratch */
+    });
+    throw e;
   } finally {
-    ffmpeg.off("progress", progressHandler);
+    try {
+      ffmpeg.off("progress", progressHandler);
+    } catch { /* noop */ }
     try {
       await ffmpeg.deleteFile(inName);
     } catch { /* noop */ }
