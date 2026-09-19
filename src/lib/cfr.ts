@@ -36,6 +36,22 @@ const LOAD_TIMEOUT_MS = 20_000;
 const INTERPOLATE_TIMEOUT_MS = 30_000;
 const PLAIN_ENCODE_TIMEOUT_MS = 60_000;
 
+/* CRASH-FIX: Core-Blobs werden genau EINMAL geladen und gecacht. Jeder
+   frische Worker (nach Timeout/OOM/Terminate) bekommt sie sonst per erneuem
+   ~31-MB-Download von unpkg — langsamer (LOAD-Timeout-Kaskaden) und
+   unnötiger Speicher-Churn genau dann, wenn der Tab ohnehin am Limit ist. */
+let coreURLsCache: { coreURL: string; wasmURL: string } | null = null;
+
+async function getCoreURLs(): Promise<{ coreURL: string; wasmURL: string }> {
+  if (!coreURLsCache) {
+    coreURLsCache = {
+      coreURL: await toBlobURL(`${CORE_BASE_URL}/ffmpeg-core.js`, "text/javascript"),
+      wasmURL: await toBlobURL(`${CORE_BASE_URL}/ffmpeg-core.wasm`, "application/wasm"),
+    };
+  }
+  return coreURLsCache;
+}
+
 function withTimeout<T>(promise: Promise<T>, ms: number, label: string): Promise<T> {
   return new Promise<T>((resolve, reject) => {
     const timer = setTimeout(() => reject(new Error(`${label} timed out after ${ms}ms`)), ms);
@@ -59,10 +75,8 @@ async function getFFmpeg(): Promise<FFmpeg> {
     ffmpegPromise = withTimeout(
       (async () => {
         const ffmpeg = new FFmpeg();
-        await ffmpeg.load({
-          coreURL: await toBlobURL(`${CORE_BASE_URL}/ffmpeg-core.js`, "text/javascript"),
-          wasmURL: await toBlobURL(`${CORE_BASE_URL}/ffmpeg-core.wasm`, "application/wasm"),
-        });
+        const { coreURL, wasmURL } = await getCoreURLs();
+        await ffmpeg.load({ coreURL, wasmURL });
         return ffmpeg;
       })(),
       LOAD_TIMEOUT_MS,
@@ -120,6 +134,8 @@ export async function forceConstantFrameRate(
           `minterpolate=fps=${fps}:mi_mode=blend`,
           "-c:v",
           "libx264",
+          "-preset",
+          "veryfast",
           "-profile:v",
           "main",
           "-pix_fmt",
@@ -153,6 +169,8 @@ export async function forceConstantFrameRate(
           "cfr",
           "-c:v",
           "libx264",
+          "-preset",
+          "veryfast",
           "-profile:v",
           "main",
           "-pix_fmt",
@@ -175,10 +193,8 @@ export async function forceConstantFrameRate(
     return new Blob([bytes], { type: "video/mp4" });
   } catch (e) {
     /* Whatever failed, make sure the *next* render doesn't inherit a
-       possibly-still-busy worker. */
-    await restartWorker().catch(() => {
-      /* restart itself failed too — next call's getFFmpeg() will retry from scratch */
-    });
+       possibly-still-busy worker — the finally block below terminates it
+       and frees the whole WASM heap, so no extra restart is needed here. */
     throw e;
   } finally {
     try {
@@ -190,5 +206,19 @@ export async function forceConstantFrameRate(
     try {
       await ffmpeg.deleteFile(outName);
     } catch { /* noop */ }
+
+    /* CRASH-FIX: Der WASM-Heap von ffmpeg.wasm wächst nur (hartes 2-GB-Limit
+       im Core) und wird vom Browser erst freigegeben, wenn der Worker
+       terminiert wird. Bliebe die Instanz gecacht, stünde die
+       High-Water-Mark des bisher schlimmsten Clips dauerhaft im Speicher —
+       über eine 10er-Batch bzw. endlose Autopilot-Runden summiert sich das
+       mit den fertigen Video-Blobs, bis der Tab mit OOM abstürzt. Deshalb:
+       nach jedem Clip bewusst terminieren; der nächste Render startet mit
+       einem frischen, kleinen Heap (die Core-Blobs sind gecacht, ein Reload
+       kostet nur die WASM-Kompilierung, keinen erneuten Download). */
+    try {
+      ffmpeg.terminate();
+    } catch { /* already gone */ }
+    ffmpegPromise = null;
   }
 }
