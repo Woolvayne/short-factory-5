@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { BarChart3, CalendarDays, Clapperboard, Send, Settings as SettingsIcon } from "lucide-react";
+import { CalendarDays, Clapperboard, Send, Settings as SettingsIcon } from "lucide-react";
 import { Factory } from "lucide-react";
 import { cn } from "../utils/cn";
 import type { Phase } from "../lib/types";
@@ -42,13 +42,12 @@ const MARQUEE_ITEMS = [
   "ZIP DELIVERY",
 ];
 
-export type NavSection = "create" | "post" | "calendar" | "analytics" | "settings";
+export type NavSection = "create" | "post" | "calendar" | "settings";
 
 const NAV: { id: NavSection; label: string; icon: typeof Factory }[] = [
   { id: "create", label: "Create", icon: Clapperboard },
   { id: "post", label: "Post", icon: Send },
   { id: "calendar", label: "Calendar", icon: CalendarDays },
-  { id: "analytics", label: "Analytics", icon: BarChart3 },
   { id: "settings", label: "Settings", icon: SettingsIcon },
 ];
 

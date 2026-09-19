@@ -18,11 +18,11 @@ import {
 } from "../lib/buffer";
 import {
   serviceMeta,
-  type LakeAccount,
-  type LakePost,
-  type PostlakePrefs,
+  type PostPrefs,
+  type SocialAccount,
   type SocialPlatform,
-} from "../lib/postlake";
+  type SocialPost,
+} from "../lib/posts";
 
 const PLATFORM_LABEL: Record<SocialPlatform, string> = {
   tiktok: "TikTok",
@@ -39,10 +39,10 @@ export default function BufferAccounts({
   onRefresh,
 }: {
   status: BufferStatus;
-  posts: LakePost[];
+  posts: SocialPost[];
   loading: boolean;
-  prefs: PostlakePrefs;
-  onPrefs: (p: PostlakePrefs) => void;
+  prefs: PostPrefs;
+  onPrefs: (p: PostPrefs) => void;
   onRefresh: () => void;
 }) {
   const plannedByAccount = useMemo(() => {
@@ -138,7 +138,7 @@ export default function BufferAccounts({
 
       {/* Kanäle */}
       <div className="mt-3 grid gap-2 sm:grid-cols-2 xl:grid-cols-3">
-        {status.accounts.map((c: LakeAccount) => {
+        {status.accounts.map((c: SocialAccount) => {
           const meta = serviceMeta(c.platform);
           const connected = c.status !== "disconnected";
           return (
@@ -205,10 +205,10 @@ export default function BufferAccounts({
         )}
       </div>
 
-      {/* Posting-Voreinstellungen (geteilt mit Postlake, nur Kanal-Mapping ist Buffer-eigen) */}
+      {/* Posting-Voreinstellungen für POST / POST ALL */}
       <div className="mt-4 border-t border-coal-700/70 pt-4">
         <span className="mono-label mb-2 block text-[9px] text-coal-400">
-          POST ALL · VOREINSTELLUNGEN (GETEILT MIT POSTLAKE)
+          POST ALL · VOREINSTELLUNGEN
         </span>
 
         <div className="grid gap-2 sm:grid-cols-2">
@@ -321,7 +321,7 @@ export default function BufferAccounts({
 
         <div className="mt-2 grid gap-2">
           <div>
-            <label className="mono-label mb-1 block text-[9px] text-coal-400">CAPTION (GETEILT)</label>
+            <label className="mono-label mb-1 block text-[9px] text-coal-400">CAPTION</label>
             <textarea
               rows={2}
               value={prefs.caption}
@@ -331,7 +331,7 @@ export default function BufferAccounts({
           </div>
           <div className="grid gap-2 sm:grid-cols-2">
             <div>
-              <label className="mono-label mb-1 block text-[9px] text-coal-400">HASHTAGS (GETEILT)</label>
+              <label className="mono-label mb-1 block text-[9px] text-coal-400">HASHTAGS</label>
               <input
                 type="text"
                 value={prefs.hashtags}

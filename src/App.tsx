@@ -15,10 +15,9 @@ import {
 } from "lucide-react";
 import Header from "./components/Header";
 import GatePanel, { GateBanner, GateBoot, useGate } from "./components/GatePanel";
-import PostlakeAccounts, { DashboardStats } from "./components/PostlakeAccounts";
+import DashboardStats from "./components/DashboardStats";
 import BufferAccounts from "./components/BufferAccounts";
-import PostlakeCalendar from "./components/PostlakeCalendar";
-import PostlakeAnalytics from "./components/PostlakeAnalytics";
+import PostsCalendar from "./components/PostsCalendar";
 import AutopilotPanel from "./components/AutopilotPanel";
 import type { NavSection } from "./components/Header";
 import IdeasPanel from "./components/IdeasPanel";
@@ -59,23 +58,15 @@ import {
   putAsset,
 } from "./lib/storage";
 import {
-  createPosts,
-  fetchStatus,
   hashtagsToList,
   loadCachedPosts,
   loadPrefs,
-  makeLocalPost,
   planFreeSlots,
-  refreshOpenPosts,
-  resolveAccountIds,
   saveCachedPosts,
   savePrefs,
-  syncPostsFromLake,
-  type CreateJob,
-  type LakePost,
-  type PostlakePrefs,
-  type PostlakeStatus,
-} from "./lib/postlake";
+  type PostPrefs,
+  type SocialPost,
+} from "./lib/posts";
 import {
   createBufferPosts,
   fetchBufferStatus,
@@ -87,11 +78,6 @@ import {
   type BufferStatus,
 } from "./lib/buffer";
 import {
-  loadDispatchProvider,
-  saveDispatchProvider,
-  type DispatchProvider,
-} from "./lib/dispatch";
-import {
   loadAutopilotConfig,
   loadAutopilotStats,
   msUntilNextDispatch,
@@ -102,7 +88,7 @@ import {
   type AutopilotLogEntry,
   type AutopilotStats,
 } from "./lib/autopilot";
-import { uploadClipForBuffer, uploadClipForPostlake } from "./lib/upload";
+import { uploadClipForBuffer } from "./lib/upload";
 import { synthesizeSpeech } from "./lib/tts";
 import { recorderSupported, renderLocal } from "./lib/renderer";
 import {
@@ -175,16 +161,8 @@ export default function App() {
   const [ideaGenAll, setIdeaGenAll] = useState(false);
   const [ideaGenIndex, setIdeaGenIndex] = useState<number | null>(null);
 
-  /* social layer: Postlake + Buffer (Versandweg wählbar) */
-  const [lakePosts, setLakePosts] = useState<LakePost[]>(() => loadCachedPosts());
-  const [lakeStatus, setLakeStatus] = useState<PostlakeStatus>({
-    hasApiKey: false,
-    apiStatus: "missing_key",
-    me: null,
-    credits: null,
-    billing: null,
-    accounts: [],
-  });
+  /* social layer: Versand ausschließlich über Buffer */
+  const [posts, setPosts] = useState<SocialPost[]>(() => loadCachedPosts());
   const [bufferStatus, setBufferStatus] = useState<BufferStatus>({
     hasApiKey: false,
     apiStatus: "missing_key",
@@ -192,11 +170,8 @@ export default function App() {
     organizations: [],
     accounts: [],
   });
-  const [lakeLoading, setLakeLoading] = useState(false);
-  const [prefs, setPrefsState] = useState<PostlakePrefs>(() => loadPrefs());
-  const [dispatchProvider, setDispatchProviderState] = useState<DispatchProvider>(() =>
-    loadDispatchProvider()
-  );
+  const [socialLoading, setSocialLoading] = useState(false);
+  const [prefs, setPrefsState] = useState<PostPrefs>(() => loadPrefs());
   const [vaultReady, setVaultReady] = useState(false);
 
   /* autopilot */
@@ -210,7 +185,6 @@ export default function App() {
   const factoryRef = useRef<HTMLDivElement>(null);
   const calendarRef = useRef<HTMLDivElement>(null);
   const postRef = useRef<HTMLDivElement>(null);
-  const analyticsRef = useRef<HTMLDivElement>(null);
   const settingsRef = useRef<HTMLDivElement>(null);
 
   const bgsRef = useRef(bgs);
@@ -236,12 +210,10 @@ export default function App() {
   phaseRef.current = phase;
   const modeRef = useRef(mode);
   modeRef.current = mode;
-  const lakeStatusRef = useRef(lakeStatus);
-  lakeStatusRef.current = lakeStatus;
   const bufferStatusRef = useRef(bufferStatus);
   bufferStatusRef.current = bufferStatus;
-  const lakePostsRef = useRef(lakePosts);
-  lakePostsRef.current = lakePosts;
+  const postsRef = useRef(posts);
+  postsRef.current = posts;
   const prefsRef = useRef(prefs);
   prefsRef.current = prefs;
   const apConfigRef = useRef(apConfig);
@@ -310,26 +282,20 @@ export default function App() {
     };
   }, []);
 
-  /* ---- Social: Status + Posts beider Versandwege laden ---- */
+  /* ---- Social: Buffer-Status + Posts laden ---- */
   const syncSocial = useCallback(async () => {
-    setLakeLoading(true);
+    setSocialLoading(true);
     try {
-      const [st, bst] = await Promise.all([fetchStatus(), fetchBufferStatus()]);
-      setLakeStatus(st);
+      const bst = await fetchBufferStatus();
       setBufferStatus(bst);
-      // Nacheinander: beide Syncs teilen sich denselben lokalen Spiegel
-      if (st.hasApiKey && st.apiStatus === "connected") {
-        const { posts } = await syncPostsFromLake({ limit: 100 });
-        setLakePosts(posts);
-      }
       if (bst.hasApiKey && bst.apiStatus === "connected") {
-        const { posts } = await syncBufferPosts({ limit: 100 });
-        setLakePosts(posts);
+        const { posts: synced } = await syncBufferPosts({ limit: 100 });
+        setPosts(synced);
       }
     } catch (e) {
       console.warn("social sync failed", e);
     } finally {
-      setLakeLoading(false);
+      setSocialLoading(false);
     }
   }, []);
 
@@ -353,7 +319,6 @@ export default function App() {
       create: factoryRef,
       post: postRef,
       calendar: calendarRef,
-      analytics: analyticsRef,
       settings: settingsRef,
     };
     map[section]?.current?.scrollIntoView({ behavior: "smooth", block: "start" });
@@ -855,14 +820,9 @@ export default function App() {
   /*  posting prefs + autopilot state helpers                       */
   /* ------------------------------------------------------------ */
 
-  const setPrefs = useCallback((p: PostlakePrefs) => {
+  const setPrefs = useCallback((p: PostPrefs) => {
     setPrefsState(p);
     savePrefs(p);
-  }, []);
-
-  const setDispatchProvider = useCallback((p: DispatchProvider) => {
-    setDispatchProviderState(p);
-    saveDispatchProvider(p);
   }, []);
 
   const setApConfig = useCallback((c: AutopilotConfig) => {
@@ -883,144 +843,31 @@ export default function App() {
   }, []);
 
   /* ------------------------------------------------------------ */
-  /*  POST ALL / POST — Versandweg wählbar: Postlake oder Buffer     */
-  /*  (Auswahl passiert im DispatchChooser beim Klick)               */
+  /*  POST ALL / POST — Versand ausschließlich über Buffer          */
   /* ------------------------------------------------------------ */
 
   const postItems = useCallback(
-    async (targets: LocalRenderItem[], via: DispatchProvider) => {
+    async (targets: LocalRenderItem[]) => {
       const videos = targets.filter((t) => t.status === "done" && t.blob && !t.posting);
       if (videos.length === 0 || apRunningRef.current) return;
-      setDispatchProvider(via);
 
-      /* ---------------- BUFFER-WEG ---------------- */
-      if (via === "buffer") {
-        const p = prefsRef.current;
-        const { ids, missing } = resolveBufferChannelIds(
-          p.platforms,
-          bufferStatusRef.current.accounts,
-          p.bufferAccountIds
-        );
-        if (ids.length === 0) {
-          setError(
-            missing.length > 0
-              ? `Keine Buffer-Kanäle für ${missing.join(", ")} verbunden — bitte erst in Buffer (publish.buffer.com → Channels) verbinden und SYNC drücken.`
-              : "Keine Buffer-Kanäle verbunden — bitte erst verbinden und SYNC drücken."
-          );
-          return;
-        }
-        if (missing.length > 0) {
-          setError(
-            `Hinweis: keine Buffer-Kanäle für ${missing.join(", ")} — poste auf ${ids.length} Kanal/Kanäle.`
-          );
-        } else {
-          setError(null);
-        }
-
-        for (const v of videos) patchItem(v.index, { posting: true, postError: null });
-
-        try {
-          const order: number[] = [];
-          const jobs: BufferCreateJob[] = [];
-          const slots =
-            p.mode === "scheduled"
-              ? planFreeSlots(lakePostsRef.current, {
-                  count: videos.length,
-                  preferredTimes: p.preferredTimes,
-                  timezone: p.timezone,
-                })
-              : [];
-
-          for (let k = 0; k < videos.length; k++) {
-            const v = videos[k];
-            let videoUrl = "";
-            try {
-              // Buffer-Pflicht: öffentliche, stabile HTTPS-URL (Supabase-Hosting)
-              videoUrl = await uploadClipForBuffer(v.blob!, `manual-${v.index}`, v.mime);
-            } catch (uploadErr) {
-              // Ohne Key: kein Versand möglich → lokal zwischenspeichern statt scheitern
-              if (bufferStatusRef.current.hasApiKey) throw uploadErr;
-            }
-            const tagList = hashtagsToList(p.hashtags);
-            const caption = (p.caption || v.idea || "").trim();
-            const stamp = Date.now();
-            const rand = Math.random().toString(36).slice(2, 7);
-            const localId = `buf_${stamp}_${v.index}_${rand}`;
-            const slot = slots[k];
-            order.push(v.index);
-            jobs.push({
-              localId,
-              text: [caption, tagList.join(" ")].filter(Boolean).join("\n\n"),
-              title: (v.idea || `Short ${v.index + 1}`).slice(0, 90),
-              hashtags: tagList,
-              channelIds: ids,
-              videoUrl,
-              previewUrl: v.blobUrl,
-              ...(slot ? { scheduledAtISO: slot.scheduledAt, timezone: p.timezone } : {}),
-              idempotencyKey: `${localId}_key`,
-            });
-          }
-
-          const res = await createBufferPosts(jobs);
-          setLakePosts(res.posts);
-
-          for (let k = 0; k < order.length; k++) {
-            const idx = order[k];
-            const post = res.posts.find((x) => x.id === jobs[k].localId);
-            if (post && post.status !== "Fehler") {
-              patchItem(idx, {
-                posting: false,
-                posted: true,
-                postedVia: "buffer",
-                postlakePostId: null,
-                postError: null,
-              });
-            } else {
-              patchItem(idx, {
-                posting: false,
-                postError:
-                  post?.errorMessage ||
-                  res.error ||
-                  "Buffer-Versand fehlgeschlagen — Details im Kalender.",
-              });
-            }
-          }
-
-          if (!res.hasApiKey) {
-            setError(
-              "BUFFER_API_KEY fehlt: Posts wurden lokal zwischengespeichert (Kalender) und gehen live, sobald der Key gesetzt ist."
-            );
-          } else if (res.failed > 0) {
-            setError(
-              `${res.failed} von ${jobs.length} Buffer-Posts meldeten Fehler — Details im Kalender, dort ggf. erneut posten.`
-            );
-          }
-        } catch (e) {
-          const msg = e instanceof Error ? e.message : String(e);
-          for (const v of videos) patchItem(v.index, { posting: false, postError: msg });
-          setError(`Buffer-Posten abgebrochen: ${msg}`);
-        }
-        return;
-      }
-
-      /* ---------------- POSTLAKE-WEG ---------------- */
       const p = prefsRef.current;
-      const { ids, missing } = resolveAccountIds(
+      const { ids, missing } = resolveBufferChannelIds(
         p.platforms,
-        lakeStatusRef.current.accounts,
-        p.accountIds
+        bufferStatusRef.current.accounts,
+        p.bufferAccountIds
       );
       if (ids.length === 0) {
         setError(
           missing.length > 0
-            ? `Keine Kanäle für ${missing.join(", ")} verbunden — bitte erst in Postlake (app.postlake.dev → Channels) verbinden und SYNC drücken.`
-            : "Keine Postlake-Kanäle verbunden — bitte erst verbinden und SYNC drücken."
+            ? `Keine Buffer-Kanäle für ${missing.join(", ")} verbunden — bitte erst in Buffer (publish.buffer.com → Channels) verbinden und SYNC drücken.`
+            : "Keine Buffer-Kanäle verbunden — bitte erst verbinden und SYNC drücken."
         );
         return;
       }
       if (missing.length > 0) {
         setError(
-          `Hinweis: keine Kanäle für ${missing.join(", ")} — poste auf ${ids.length} Kanal/Kanäle.`
+          `Hinweis: keine Buffer-Kanäle für ${missing.join(", ")} — poste auf ${ids.length} Kanal/Kanäle.`
         );
       } else {
         setError(null);
@@ -1030,10 +877,10 @@ export default function App() {
 
       try {
         const order: number[] = [];
-        const jobs: CreateJob[] = [];
+        const jobs: BufferCreateJob[] = [];
         const slots =
           p.mode === "scheduled"
-            ? planFreeSlots(lakePostsRef.current, {
+            ? planFreeSlots(postsRef.current, {
                 count: videos.length,
                 preferredTimes: p.preferredTimes,
                 timezone: p.timezone,
@@ -1042,18 +889,19 @@ export default function App() {
 
         for (let k = 0; k < videos.length; k++) {
           const v = videos[k];
-          let mediaId = "";
+          let videoUrl = "";
           try {
-            mediaId = await uploadClipForPostlake(v.blob!, `manual-${v.index}`, v.mime);
+            // Buffer-Pflicht: öffentliche, stabile HTTPS-URL (Supabase-Hosting)
+            videoUrl = await uploadClipForBuffer(v.blob!, `manual-${v.index}`, v.mime);
           } catch (uploadErr) {
-            // Ohne Key: kein Upload möglich → lokal zwischenspeichern statt scheitern
-            if (lakeStatusRef.current.hasApiKey) throw uploadErr;
+            // Ohne Key: kein Versand möglich → lokal zwischenspeichern statt scheitern
+            if (bufferStatusRef.current.hasApiKey) throw uploadErr;
           }
           const tagList = hashtagsToList(p.hashtags);
           const caption = (p.caption || v.idea || "").trim();
           const stamp = Date.now();
           const rand = Math.random().toString(36).slice(2, 7);
-          const localId = `lake_${stamp}_${v.index}_${rand}`;
+          const localId = `buf_${stamp}_${v.index}_${rand}`;
           const slot = slots[k];
           order.push(v.index);
           jobs.push({
@@ -1061,55 +909,49 @@ export default function App() {
             text: [caption, tagList.join(" ")].filter(Boolean).join("\n\n"),
             title: (v.idea || `Short ${v.index + 1}`).slice(0, 90),
             hashtags: tagList,
-            accounts: ids,
-            media: mediaId ? [mediaId] : [],
+            channelIds: ids,
+            videoUrl,
             previewUrl: v.blobUrl,
-            ...(slot ? { scheduledAt: slot.naive, timezone: p.timezone } : {}),
+            ...(slot ? { scheduledAtISO: slot.scheduledAt, timezone: p.timezone } : {}),
             idempotencyKey: `${localId}_key`,
           });
         }
 
-        const res = await createPosts(jobs);
-        setLakePosts(res.posts);
+        const res = await createBufferPosts(jobs);
+        setPosts(res.posts);
 
         for (let k = 0; k < order.length; k++) {
           const idx = order[k];
           const post = res.posts.find((x) => x.id === jobs[k].localId);
           if (post && post.status !== "Fehler") {
-            patchItem(idx, {
-              posting: false,
-              posted: true,
-              postedVia: "postlake",
-              postlakePostId: post.postlakeId,
-              postError: null,
-            });
+            patchItem(idx, { posting: false, posted: true, postError: null });
           } else {
             patchItem(idx, {
               posting: false,
               postError:
                 post?.errorMessage ||
                 res.error ||
-                "Versand fehlgeschlagen — Details im Kalender.",
+                "Buffer-Versand fehlgeschlagen — Details im Kalender.",
             });
           }
         }
 
         if (!res.hasApiKey) {
           setError(
-            "POSTLAKE_API_KEY fehlt: Posts wurden lokal zwischengespeichert (Kalender) und gehen live, sobald der Key gesetzt ist."
+            "BUFFER_API_KEY fehlt: Posts wurden lokal zwischengespeichert (Kalender) und gehen live, sobald der Key gesetzt ist."
           );
         } else if (res.failed > 0) {
           setError(
-            `${res.failed} von ${jobs.length} Posts meldeten Fehler — Details im Kalender, dort ggf. erneut posten.`
+            `${res.failed} von ${jobs.length} Buffer-Posts meldeten Fehler — Details im Kalender, dort ggf. erneut posten.`
           );
         }
       } catch (e) {
         const msg = e instanceof Error ? e.message : String(e);
         for (const v of videos) patchItem(v.index, { posting: false, postError: msg });
-        setError(`Posten abgebrochen: ${msg}`);
+        setError(`Buffer-Posten abgebrochen: ${msg}`);
       }
     },
-    [patchItem, setDispatchProvider]
+    [patchItem]
   );
 
   /* ------------------------------------------------------------ */
@@ -1147,41 +989,29 @@ export default function App() {
     const runId = apRunIdRef.current;
     const alive = () => apRunningRef.current && apRunIdRef.current === runId;
 
-    // Kanäle frisch auflösen (je nach Auto-Provider: Postlake oder Buffer)
+    // Buffer-Kanäle frisch auflösen
     try {
       const wanted = apConfigRef.current;
-      const via = wanted.provider;
-      const label = via === "buffer" ? "Buffer" : "Postlake";
-      const [st, bst] = await Promise.all([fetchStatus(), fetchBufferStatus()]);
+      const bst = await fetchBufferStatus();
       if (!alive()) return;
-      setLakeStatus(st);
       setBufferStatus(bst);
-      const { ids, missing } =
-        via === "buffer"
-          ? resolveBufferChannelIds(wanted.platforms, bst.accounts, wanted.bufferAccountIds)
-          : resolveAccountIds(wanted.platforms, st.accounts, wanted.accountIds);
+      const { ids, missing } = resolveBufferChannelIds(
+        wanted.platforms,
+        bst.accounts,
+        wanted.bufferAccountIds
+      );
       apAccountRef.current = ids;
       if (missing.length > 0) {
-        apLogIt("warn", `Keine ${label}-Kanäle für: ${missing.join(", ")} — poste auf ${ids.length} Kanal/Kanäle.`);
+        apLogIt("warn", `Keine Buffer-Kanäle für: ${missing.join(", ")} — poste auf ${ids.length} Kanal/Kanäle.`);
       }
       if (ids.length === 0) {
-        const hasKey = via === "buffer" ? bst.hasApiKey : st.hasApiKey;
         apLogIt(
           "warn",
-          hasKey
-            ? `Keine ${label}-Kanäle verbunden — Videos werden nur lokal zwischengespeichert.`
-            : `Kein ${via === "buffer" ? "BUFFER_API_KEY" : "POSTLAKE_API_KEY"} — Videos werden nur lokal zwischengespeichert.`
+          bst.hasApiKey
+            ? "Keine Buffer-Kanäle verbunden — Videos werden nur lokal zwischengespeichert."
+            : "Kein BUFFER_API_KEY — Videos werden nur lokal zwischengespeichert."
         );
-      }
-      if (via === "postlake") {
-        const credits = st.credits?.total;
-        if (typeof credits === "number") {
-          apLogIt(
-            credits <= 10 ? "warn" : "info",
-            `Postlake-Guthaben: ${credits} Credits (1 Credit pro Kanal-Post).`
-          );
-        }
-      } else if (ids.length > 0) {
+      } else {
         apLogIt("info", `Buffer bereit: ${ids.length} Kanal/Kanäle (${bst.organizations[0]?.name || "Workspace"}).`);
       }
     } catch (e) {
@@ -1322,69 +1152,49 @@ export default function App() {
 
       try {
         const cfg = apConfigRef.current;
-        const via = cfg.provider;
-        const label = via === "buffer" ? "Buffer" : "Postlake";
         const accounts =
           apAccountRef.current.length > 0
             ? apAccountRef.current
-            : via === "buffer"
-              ? resolveBufferChannelIds(cfg.platforms, bufferStatusRef.current.accounts, cfg.bufferAccountIds).ids
-              : resolveAccountIds(cfg.platforms, lakeStatusRef.current.accounts, cfg.accountIds).ids;
+            : resolveBufferChannelIds(cfg.platforms, bufferStatusRef.current.accounts, cfg.bufferAccountIds).ids;
         // Kanäle können mid-run dazukommen (Poller aktualisiert den Status)
         if (accounts.length > 0) apAccountRef.current = accounts;
 
-        let scheduledNaive: string | undefined;
         let scheduledISO: string | undefined;
         const timezone = "Europe/Berlin";
         if (cfg.mode === "scheduled") {
-          const slot = planFreeSlots(lakePostsRef.current, {
+          const slot = planFreeSlots(postsRef.current, {
             count: 1,
             preferredTimes: ["06:00", "20:00"],
             timezone,
           })[0];
-          if (slot) {
-            scheduledNaive = slot.naive;
-            scheduledISO = slot.scheduledAt;
-          }
+          if (slot) scheduledISO = slot.scheduledAt;
         }
+
+        // Stabile ID pro Job: Retries teilen sich Key + Idempotency (kein Doppel-Post)
+        const localId = `buf_auto_${job.key.replace(":", "_")}`;
 
         // Keine Kanäle (kein Key / nichts verbunden): lokal cachen, nichts verlieren
         if (accounts.length === 0) {
-          // Stabile ID pro Job: Retries teilen sich Key + Idempotency (kein Doppel-Post)
-          const localId = `${via === "buffer" ? "buf" : "lake"}_auto_${job.key.replace(":", "_")}`;
-          const local =
-            via === "buffer"
-              ? makeBufferLocalPost({
-                  localId,
-                  text: job.text,
-                  title: job.title,
-                  hashtags: job.hashtags,
-                  channelIds: [],
-                  videoUrl: "",
-                  previewUrl: job.previewUrl,
-                  ...(scheduledISO ? { scheduledAtISO: scheduledISO, timezone } : {}),
-                  idempotencyKey: `${localId}_key`,
-                })
-              : makeLocalPost({
-                  localId,
-                  text: job.text,
-                  title: job.title,
-                  hashtags: job.hashtags,
-                  accounts: [],
-                  media: [],
-                  previewUrl: job.previewUrl,
-                  ...(scheduledNaive ? { scheduledAt: scheduledNaive, timezone } : {}),
-                  idempotencyKey: `${localId}_key`,
-                });
-          const merged = [local, ...lakePostsRef.current].slice(0, 500);
+          const local = makeBufferLocalPost({
+            localId,
+            text: job.text,
+            title: job.title,
+            hashtags: job.hashtags,
+            channelIds: [],
+            videoUrl: "",
+            previewUrl: job.previewUrl,
+            ...(scheduledISO ? { scheduledAtISO: scheduledISO, timezone } : {}),
+            idempotencyKey: `${localId}_key`,
+          });
+          const merged = [local, ...postsRef.current].slice(0, 500);
           saveCachedPosts(merged);
-          setLakePosts(merged);
+          setPosts(merged);
           recordDispatch();
           apQueueRef.current.shift();
           setApQueueDepth(apQueueRef.current.length);
           bumpStats((prev) => ({ totalPosted: prev.totalPosted + 1 }));
           if (sameRound()) {
-            patchItem(job.index, { posting: false, posted: true, postedVia: via, postlakePostId: null, postError: null });
+            patchItem(job.index, { posting: false, posted: true, postError: null });
           }
           apLogIt("warn", `Video #${job.index + 1} (R${job.round}) lokal zwischengespeichert (keine Kanäle).`);
           continue;
@@ -1392,49 +1202,26 @@ export default function App() {
 
         apLogIt("info", `Lade Video #${job.index + 1} (R${job.round}) hoch …`);
         const cacheKey = `auto-r${job.round}-${job.index}`;
-        const localId = `${via === "buffer" ? "buf" : "lake"}_auto_${job.key.replace(":", "_")}`;
-        let res: { posts: LakePost[]; hasApiKey: boolean; error?: string };
-        if (via === "buffer") {
-          // Buffer: erst ins Supabase-Hosting (öffentliche URL), dann 1 Mutation pro Kanal
-          const videoUrl = await uploadClipForBuffer(job.blob, cacheKey, job.mime);
-          if (!alive()) {
-            if (sameRound()) patchItem(job.index, { posting: false });
-            break;
-          }
-          res = await createBufferPosts([
-            {
-              localId,
-              text: job.text,
-              title: job.title,
-              hashtags: job.hashtags,
-              channelIds: accounts,
-              videoUrl,
-              previewUrl: job.previewUrl,
-              ...(scheduledISO ? { scheduledAtISO: scheduledISO, timezone } : {}),
-              idempotencyKey: `${localId}_key`,
-            },
-          ]);
-        } else {
-          const mediaId = await uploadClipForPostlake(job.blob, cacheKey, job.mime);
-          if (!alive()) {
-            if (sameRound()) patchItem(job.index, { posting: false });
-            break;
-          }
-          res = await createPosts([
-            {
-              localId,
-              text: job.text,
-              title: job.title,
-              hashtags: job.hashtags,
-              accounts,
-              media: [mediaId],
-              previewUrl: job.previewUrl,
-              ...(scheduledNaive ? { scheduledAt: scheduledNaive, timezone } : {}),
-              idempotencyKey: `${localId}_key`,
-            },
-          ]);
+        // Buffer: erst ins Supabase-Hosting (öffentliche URL), dann 1 Mutation pro Kanal
+        const videoUrl = await uploadClipForBuffer(job.blob, cacheKey, job.mime);
+        if (!alive()) {
+          if (sameRound()) patchItem(job.index, { posting: false });
+          break;
         }
-        setLakePosts(res.posts);
+        const res = await createBufferPosts([
+          {
+            localId,
+            text: job.text,
+            title: job.title,
+            hashtags: job.hashtags,
+            channelIds: accounts,
+            videoUrl,
+            previewUrl: job.previewUrl,
+            ...(scheduledISO ? { scheduledAtISO: scheduledISO, timezone } : {}),
+            idempotencyKey: `${localId}_key`,
+          },
+        ]);
+        setPosts(res.posts);
         recordDispatch();
         apQueueRef.current.shift();
         setApQueueDepth(apQueueRef.current.length);
@@ -1443,18 +1230,12 @@ export default function App() {
         if (created && created.status !== "Fehler") {
           bumpStats((prev) => ({ totalPosted: prev.totalPosted + 1 }));
           if (sameRound()) {
-            patchItem(job.index, {
-              posting: false,
-              posted: true,
-              postedVia: via,
-              postlakePostId: created.postlakeId,
-              postError: null,
-            });
+            patchItem(job.index, { posting: false, posted: true, postError: null });
           }
           apLogIt(
             "ok",
             res.hasApiKey
-              ? `Video #${job.index + 1} (R${job.round}) → ${label} (${created.status}).`
+              ? `Video #${job.index + 1} (R${job.round}) → Buffer (${created.status}).`
               : `Video #${job.index + 1} (R${job.round}) lokal zwischengespeichert (kein Key).`
           );
         } else {
@@ -1481,7 +1262,7 @@ export default function App() {
     }
   }, [apLogIt, bumpStats, patchItem]);
 
-  /** Status-Poller: offene Posts + Credits aktuell halten. */
+  /** Status-Poller: offene Buffer-Posts + Kanalstatus aktuell halten. */
   const runStatusPoller = useCallback(async () => {
     const runId = apRunIdRef.current;
     const alive = () => apRunningRef.current && apRunIdRef.current === runId;
@@ -1490,19 +1271,13 @@ export default function App() {
       if (!alive()) break;
       if (!apConfigRef.current.pollStatus) continue;
       try {
-        // Nacheinander: beide teilen sich denselben lokalen Spiegel
-        const lake = await refreshOpenPosts();
         const buf = await refreshOpenBufferPosts();
-        const refreshed = lake.refreshed + buf.refreshed;
-        if (refreshed > 0) {
-          setLakePosts(buf.posts);
-          apLogIt("info", `${refreshed} Post-Status bei Postlake/Buffer aktualisiert.`);
+        if (buf.refreshed > 0) {
+          setPosts(buf.posts);
+          apLogIt("info", `${buf.refreshed} Post-Status bei Buffer aktualisiert.`);
         }
-        const [st, bst] = await Promise.all([fetchStatus(), fetchBufferStatus()]);
-        if (alive()) {
-          setLakeStatus(st);
-          setBufferStatus(bst);
-        }
+        const bst = await fetchBufferStatus();
+        if (alive()) setBufferStatus(bst);
       } catch {
         /* still, still — nächster Tick */
       }
@@ -1625,7 +1400,7 @@ export default function App() {
       <Header
         phase={phase}
         keyed={keyed}
-        scheduledCount={lakePosts.length}
+        scheduledCount={posts.length}
         onJump={jumpTo}
       />
 
@@ -1710,8 +1485,7 @@ export default function App() {
         {/* ---------------- Dashboard header stats ---------------- */}
         <div className="mb-5">
           <DashboardStats
-            posts={lakePosts}
-            credits={lakeStatus.credits?.total ?? null}
+            posts={posts}
             hourLimit={apConfig.videosPerHour}
             onCreate={() => jumpTo("create")}
           />
@@ -1810,28 +1584,11 @@ export default function App() {
               onPostMode={(m) => setPrefs({ ...prefs, mode: m })}
               onBuildZip={buildZip}
               onRenderOne={renderOne}
-              onPostItems={(targets, via) => void postItems(targets, via)}
-              dispatchDefault={dispatchProvider}
-              postlakeReady={{
-                hasKey: lakeStatus.hasApiKey,
-                connected:
-                  lakeStatus.apiStatus === "connected" &&
-                  lakeStatus.accounts.some((a) => a.status !== "disconnected"),
-                channels: lakeStatus.accounts.filter((a) => a.status !== "disconnected").length,
-                detail: "1 Call \u2192 alle Kan\u00e4le \u00b7 Upload per signierter PUT-URL.",
-              }}
-              bufferReady={{
-                hasKey: bufferStatus.hasApiKey,
-                connected:
-                  bufferStatus.apiStatus === "connected" &&
-                  bufferStatus.accounts.some((a) => a.status !== "disconnected"),
-                channels: bufferStatus.accounts.filter((a) => a.status !== "disconnected").length,
-                detail: "1 Mutation pro Kanal \u00b7 Video vorab ins Supabase-Hosting.",
-              }}
+              onPostItems={(targets) => void postItems(targets)}
             />
           </div>
 
-          {/* ---------------- RIGHT: autopilot, social, calendar, analytics ---------------- */}
+          {/* ---------------- RIGHT: autopilot, social, calendar ---------------- */}
           <div className="grid content-start gap-5 xl:max-h-[calc(100vh-7rem)] xl:overflow-y-auto xl:pr-2">
             <div ref={postRef} className="scroll-mt-28">
               <AutopilotPanel
@@ -1844,8 +1601,6 @@ export default function App() {
                 posting={apPosting}
                 canStart={canAutostart}
                 blockers={autopilotBlockers}
-                hasKey={lakeStatus.hasApiKey}
-                credits={lakeStatus.credits?.total ?? null}
                 bufferHasKey={bufferStatus.hasApiKey}
                 bufferChannels={bufferStatus.accounts.filter((a) => a.status !== "disconnected").length}
                 onStart={startAutopilot}
@@ -1853,36 +1608,23 @@ export default function App() {
               />
             </div>
 
-            <PostlakeAccounts
-              status={lakeStatus}
-              posts={lakePosts}
-              loading={lakeLoading}
-              prefs={prefs}
-              onPrefs={setPrefs}
-              onRefresh={() => void syncSocial()}
-            />
-
             <BufferAccounts
               status={bufferStatus}
-              posts={lakePosts}
-              loading={lakeLoading}
+              posts={posts}
+              loading={socialLoading}
               prefs={prefs}
               onPrefs={setPrefs}
               onRefresh={() => void syncSocial()}
             />
 
             <div ref={calendarRef} className="scroll-mt-28">
-              <PostlakeCalendar
-                posts={lakePosts}
+              <PostsCalendar
+                posts={posts}
                 timezone={prefs.timezone}
-                loading={lakeLoading}
-                onPostsChange={setLakePosts}
+                loading={socialLoading}
+                onPostsChange={setPosts}
                 onRefresh={() => void syncSocial()}
               />
-            </div>
-
-            <div ref={analyticsRef} className="scroll-mt-28">
-              <PostlakeAnalytics posts={lakePosts} />
             </div>
           </div>
         </div>
@@ -1907,7 +1649,7 @@ export default function App() {
             </span>
           </div>
           <p className="font-mono text-[9.5px] tracking-wider text-coal-500">
-            SHORTSFACTORY · CLIP MILL + BUFFER/POSTLAKE AUTOPILOT — NO FFMPEG · NO MERCY
+            SHORTSFACTORY · CLIP MILL + BUFFER AUTOPILOT — NO FFMPEG · NO MERCY
           </p>
         </footer>
       </main>

@@ -1,10 +1,10 @@
 /**
- * Buffer-Client (Frontend).
+ * Buffer-Client (Frontend) — der einzige Versandweg.
  *
  * Spricht ausschließlich mit der Route /api/buffer — der BUFFER_API_KEY
  * bleibt auf dem Server und erreicht dieses Bundle nie.
  *
- * Unterschiede zu Postlake (laut developers.buffer.com):
+ * Eigenheiten (laut developers.buffer.com):
  * - GraphQL, genau EINE channelId pro createPost-Mutation (der Server
  *   fächert 1 Video × N Kanäle in N Mutationen auf).
  * - KEIN Medien-Upload: Videos müssen unter einer öffentlichen, stabilen
@@ -13,21 +13,21 @@
  * - Planen = mode customScheduled + dueAt (ISO UTC, Zukunft);
  *   sofort = mode shareNow.
  *
- * Ergebnisse landen im SELBEN localStorage-Spiegel wie Postlake-Posts
- * (provider: „buffer"), damit Kalender & Dashboard beide Wege zeigen.
+ * Ergebnisse landen im lokalen Post-Spiegel (siehe posts.ts, provider
+ * „buffer"), damit Kalender & Dashboard auch ohne Key/Netz rendern.
  */
 
 import {
   loadCachedPosts,
   saveCachedPosts,
   wallTimeToISO,
-  type LakeAccount,
-  type LakePost,
-  type LakeState,
-  type LakeTarget,
+  type PostState,
   type PostStatus,
+  type PostTarget,
+  type SocialAccount,
   type SocialPlatform,
-} from "./postlake";
+  type SocialPost,
+} from "./posts";
 
 export const BUFFER_DASHBOARD = "https://publish.buffer.com";
 export const BUFFER_API_SETTINGS = "https://publish.buffer.com/settings/api";
@@ -37,7 +37,7 @@ export const BUFFER_API_SETTINGS = "https://publish.buffer.com/settings/api";
 /* ------------------------------------------------------------------ */
 
 export function mapBufferState(s: string | undefined | null): {
-  state: LakeState;
+  state: PostState;
   status: PostStatus;
 } {
   const v = String(s || "").toLowerCase();
@@ -80,7 +80,7 @@ export interface BufferStatus {
   apiStatus: "connected" | "missing_key" | "invalid_key" | "unreachable";
   me: { email?: string; name?: string } | null;
   organizations: BufferOrganization[];
-  accounts: LakeAccount[];
+  accounts: SocialAccount[];
   keyError?: string;
 }
 
@@ -114,7 +114,7 @@ export async function fetchBufferStatus(): Promise<BufferStatus> {
  */
 export function resolveBufferChannelIds(
   platforms: SocialPlatform[],
-  accounts: LakeAccount[],
+  accounts: SocialAccount[],
   overrides: Partial<Record<SocialPlatform, string>>
 ): { ids: string[]; missing: SocialPlatform[]; byPlatform: Partial<Record<SocialPlatform, string>> } {
   const ids: string[] = [];
@@ -170,12 +170,11 @@ interface BufferCreateResult {
   error?: string;
 }
 
-/** Lokaler LakePost-Spiegel für einen Buffer-Job (Offline-/No-Key-Fallback). */
-export function makeBufferLocalPost(job: BufferCreateJob, nowIso = new Date().toISOString()): LakePost {
+/** Lokaler SocialPost-Spiegel für einen Buffer-Job (Offline-/No-Key-Fallback). */
+export function makeBufferLocalPost(job: BufferCreateJob, nowIso = new Date().toISOString()): SocialPost {
   const scheduledAt = job.scheduledAtISO || nowIso;
   return {
     id: job.localId,
-    postlakeId: null,
     text: job.text,
     title: job.title,
     hashtags: job.hashtags,
@@ -198,9 +197,9 @@ export function makeBufferLocalPost(job: BufferCreateJob, nowIso = new Date().to
   };
 }
 
-function mergeBufferRemote(base: LakePost, remotes: BufferRemotePost[]): LakePost {
+function mergeBufferRemote(base: SocialPost, remotes: BufferRemotePost[]): SocialPost {
   const nowIso = new Date().toISOString();
-  const targets: LakeTarget[] = remotes.map((r) => {
+  const targets: PostTarget[] = remotes.map((r) => {
     const { state } = mapBufferState(r.status);
     return { account: r.channelId, platform: r.platform, state };
   });
@@ -208,7 +207,7 @@ function mergeBufferRemote(base: LakePost, remotes: BufferRemotePost[]): LakePos
   const rank = (s: PostStatus) =>
     s === "Fehler" ? 4 : s === "Wird veröffentlicht" ? 3 : s === "Geplant" ? 2 : s === "Entwurf" ? 1 : 0;
   let best: PostStatus = "Veröffentlicht";
-  let bestState: LakeState = "published";
+  let bestState: PostState = "published";
   for (const r of remotes) {
     const m = mapBufferState(r.status);
     if (rank(m.status) > rank(best)) {
@@ -233,10 +232,10 @@ function mergeBufferRemote(base: LakePost, remotes: BufferRemotePost[]): LakePos
 
 /**
  * Postet 1..N Videos über Buffer (Server fächert je Kanal auf).
- * Legt lokale LakePost-Spiegel an und mergt Remote-Antworten ein.
+ * Legt lokale SocialPost-Spiegel an und mergt Remote-Antworten ein.
  */
 export async function createBufferPosts(jobs: BufferCreateJob[]): Promise<{
-  posts: LakePost[];
+  posts: SocialPost[];
   created: number;
   failed: number;
   hasApiKey: boolean;
@@ -267,7 +266,7 @@ export async function createBufferPosts(jobs: BufferCreateJob[]): Promise<{
       if (!r) {
         return {
           ...base,
-          state: "failed" as LakeState,
+          state: "failed" as PostState,
           status: "Fehler" as PostStatus,
           errorMessage: "Keine Antwort von Buffer.",
           local: false,
@@ -276,7 +275,7 @@ export async function createBufferPosts(jobs: BufferCreateJob[]): Promise<{
       if (!r.ok || !r.posts || r.posts.length === 0) {
         return {
           ...base,
-          state: "failed" as LakeState,
+          state: "failed" as PostState,
           status: "Fehler" as PostStatus,
           errorMessage: r.error || "Buffer-Fehler.",
           local: false,
@@ -327,7 +326,7 @@ export async function createBufferPosts(jobs: BufferCreateJob[]): Promise<{
 }
 
 /** Offene Buffer-Posts pollen und mergen (1 Spiegel = N Kanal-Posts). */
-export async function refreshOpenBufferPosts(): Promise<{ posts: LakePost[]; refreshed: number }> {
+export async function refreshOpenBufferPosts(): Promise<{ posts: SocialPost[]; refreshed: number }> {
   const cached = loadCachedPosts();
   const open = cached.filter(
     (p) =>
@@ -361,10 +360,10 @@ export async function refreshOpenBufferPosts(): Promise<{ posts: LakePost[]; ref
 
 /**
  * Buffer-Postliste holen und mit dem Cache mergen.
- * Postlake-Posts bleiben unangetastet; lokale Buffer-Entwürfe auch.
+ * Bestandsdaten anderer Herkunft bleiben unangetastet; lokale Buffer-Entwürfe auch.
  */
 export async function syncBufferPosts(opts?: { limit?: number }): Promise<{
-  posts: LakePost[];
+  posts: SocialPost[];
   hasApiKey: boolean;
   error?: string;
 }> {
@@ -380,7 +379,7 @@ export async function syncBufferPosts(opts?: { limit?: number }): Promise<{
     const nowIso = new Date().toISOString();
     // Buffer liefert 1 Zeile pro Kanal-Post → zu Spiegeln gruppieren.
     // Zuerst nach lokalem Zwilling (stabile bufferPostIds), sonst nach Text+Zeit.
-    const byBufferId = new Map<string, LakePost>();
+    const byBufferId = new Map<string, SocialPost>();
     for (const p of cached) {
       if (p.provider !== "buffer") continue;
       for (const bid of p.bufferPostIds || []) byBufferId.set(bid, p);
@@ -392,7 +391,7 @@ export async function syncBufferPosts(opts?: { limit?: number }): Promise<{
       if (!groups.has(key)) groups.set(key, []);
       groups.get(key)!.push(r);
     }
-    const synced: LakePost[] = [];
+    const synced: SocialPost[] = [];
     const seenTwin = new Set<string>();
     for (const remotes of groups.values()) {
       const twin = remotes.map((r) => byBufferId.get(r.id)).find(Boolean);
@@ -401,9 +400,8 @@ export async function syncBufferPosts(opts?: { limit?: number }): Promise<{
         seenTwin.add(twin.id);
       }
       const first = remotes[0];
-      const base: LakePost = twin || {
+      const base: SocialPost = twin || {
         id: `buf_${first.id}`,
-        postlakeId: null,
         text: first.text,
         title: String(first.text || "").split("\n")[0].slice(0, 90) || "Buffer-Post",
         hashtags: [],
@@ -441,7 +439,7 @@ export async function syncBufferPosts(opts?: { limit?: number }): Promise<{
 }
 
 /** Buffer-Spiegel stornieren (alle Kanal-Posts löschen + lokal entfernen). */
-export async function cancelBufferPost(post: LakePost): Promise<LakePost[]> {
+export async function cancelBufferPost(post: SocialPost): Promise<SocialPost[]> {
   if (post.bufferPostIds && post.bufferPostIds.length > 0 && !post.local) {
     try {
       await call({ action: "cancel", ids: post.bufferPostIds });
@@ -456,21 +454,21 @@ export async function cancelBufferPost(post: LakePost): Promise<LakePost[]> {
 
 /** Buffer-Spiegel umbuchen (alle Kanal-Posts auf neues dueAt). */
 export async function rescheduleBufferPost(
-  post: LakePost,
+  post: SocialPost,
   naiveLocal: string,
   timezone: string
-): Promise<{ posts: LakePost[]; error?: string }> {
+): Promise<{ posts: SocialPost[]; error?: string }> {
   const cached = loadCachedPosts();
   const [d, t] = naiveLocal.split("T");
   const [y, m, dd] = d.split("-").map(Number);
   const [hh, mm] = (t || "06:00").split(":").map(Number);
   const iso = wallTimeToISO(y, m, dd, hh, mm || 0, timezone);
-  const applyLocal = (p: LakePost) => ({
+  const applyLocal = (p: SocialPost) => ({
     ...p,
     scheduledAt: iso,
     scheduledAtLocal: naiveLocal,
     timezone,
-    state: "scheduled" as LakeState,
+    state: "scheduled" as PostState,
     status: "Geplant" as PostStatus,
     updatedAt: new Date().toISOString(),
   });

@@ -73,14 +73,14 @@ function readQuery(req: IncomingMessage): Record<string, string | string[]> {
 }
 
 /** Vercel-Routen, die der Dev-Server lokal aus `api/*.js` bedient. */
-const DEV_API_ROUTES = ["tts", "postlake", "buffer"] as const;
+const DEV_API_ROUTES = ["tts", "buffer"] as const;
 
 /**
  * Dev-only: bedient die Vercel-API-Routen lokal im Vite-Server.
  *
  * Ohne diese Middleware antwortet `npm run dev` auf `/api/*` mit Vites
  * HTML-Fallback/404 — die Factory zeigt dann beim Klick auf „Video erstellen"
- * nur „TTS relay failed", und Postlake-/Buffer-Panels bleiben leer. In
+ * nur „TTS relay failed", und das Buffer-Panel bleibt leer. In
  * Produktion übernimmt Vercel weiterhin die Dateien unter `api/` direkt;
  * diese Middleware gilt ausschließlich lokal.
  */
@@ -93,7 +93,6 @@ function apiDevPlugin(mode: string): Plugin {
       for (const key of [
         "APP_PASSWORD",
         "GATE_TTL_HOURS",
-        "POSTLAKE_API_KEY",
         "BUFFER_API_KEY",
       ]) {
         if (env[key] !== undefined && process.env[key] === undefined) {
