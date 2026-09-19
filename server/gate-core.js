@@ -10,7 +10,7 @@
  *   - APP_PASSWORD NICHT gesetzt → alles offen, es wird NICHT gefragt
  *     (die App zeigt im UI nur einen dezenten Verweis auf die Variable).
  *   - APP_PASSWORD gesetzt → Client zeigt beim Start einen Lock-Screen;
- *     alle Server-Routen (/api/gate, /api/tts, /api/postlake, /api/buffer)
+ *     die Server-Routen (/api/gate, /api/tts)
  *     verlangen eine gültige Gate-Session (HMAC-signiertes HttpOnly-Cookie).
  *
  * Das Cookie wird aus dem Passwort selbst abgeleitet signiert (HMAC-SHA256
@@ -175,7 +175,7 @@ function clearGateCookie(req, res) {
 }
 
 /* ------------------------------------------------------------------ */
-/*  Schutz für die anderen Routen (tts / postlake / buffer)             */
+/*  Schutz für die anderen Routen (tts)                                 */
 /* ------------------------------------------------------------------ */
 
 /**

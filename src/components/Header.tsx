@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { BarChart3, CalendarDays, Clapperboard, Send, Settings as SettingsIcon } from "lucide-react";
+import { Clapperboard, Settings as SettingsIcon } from "lucide-react";
 import { Factory } from "lucide-react";
 import { cn } from "../utils/cn";
 import type { Phase } from "../lib/types";
@@ -42,25 +42,20 @@ const MARQUEE_ITEMS = [
   "ZIP DELIVERY",
 ];
 
-export type NavSection = "create" | "post" | "calendar" | "analytics" | "settings";
+export type NavSection = "create" | "settings";
 
 const NAV: { id: NavSection; label: string; icon: typeof Factory }[] = [
   { id: "create", label: "Create", icon: Clapperboard },
-  { id: "post", label: "Post", icon: Send },
-  { id: "calendar", label: "Calendar", icon: CalendarDays },
-  { id: "analytics", label: "Analytics", icon: BarChart3 },
   { id: "settings", label: "Settings", icon: SettingsIcon },
 ];
 
 export default function Header({
   phase,
   keyed,
-  scheduledCount,
   onJump,
 }: {
   phase: Phase;
   keyed: boolean;
-  scheduledCount: number;
   onJump: (section: NavSection) => void;
 }) {
   const running = phase === "preparing" || phase === "rendering";
@@ -92,11 +87,6 @@ export default function Header({
                 className="flex items-center gap-1.5 border border-coal-700 bg-coal-850 px-2.5 py-1.5 font-mono text-[9.5px] font-bold tracking-widest text-coal-300 transition-colors hover:border-volt-400 hover:text-volt-300"
               >
                 <Icon className="size-3.5" /> {label}
-                {id === "calendar" && scheduledCount > 0 && (
-                  <span className="bg-heat ml-0.5 rounded-full px-1.5 py-px font-mono text-[8.5px] font-bold text-coal-950">
-                    {scheduledCount}
-                  </span>
-                )}
               </button>
             ))}
           </nav>
@@ -153,11 +143,6 @@ export default function Header({
             className="flex shrink-0 items-center gap-1.5 border border-coal-700 bg-coal-850 px-3 py-2 font-mono text-[10px] font-bold tracking-widest text-coal-300 active:border-volt-400 active:text-volt-300"
           >
             <Icon className="size-3.5" /> {label}
-            {id === "calendar" && scheduledCount > 0 && (
-              <span className="bg-heat ml-0.5 rounded-full px-1.5 py-px text-[8.5px] text-coal-950">
-                {scheduledCount}
-              </span>
-            )}
           </button>
         ))}
       </nav>

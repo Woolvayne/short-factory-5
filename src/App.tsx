@@ -15,11 +15,6 @@ import {
 } from "lucide-react";
 import Header from "./components/Header";
 import GatePanel, { GateBanner, GateBoot, useGate } from "./components/GatePanel";
-import PostlakeAccounts, { DashboardStats } from "./components/PostlakeAccounts";
-import BufferAccounts from "./components/BufferAccounts";
-import PostlakeCalendar from "./components/PostlakeCalendar";
-import PostlakeAnalytics from "./components/PostlakeAnalytics";
-import AutopilotPanel from "./components/AutopilotPanel";
 import type { NavSection } from "./components/Header";
 import IdeasPanel from "./components/IdeasPanel";
 import SettingsPanel from "./components/SettingsPanel";
@@ -58,51 +53,6 @@ import {
   patchAssetMeta,
   putAsset,
 } from "./lib/storage";
-import {
-  createPosts,
-  fetchStatus,
-  hashtagsToList,
-  loadCachedPosts,
-  loadPrefs,
-  makeLocalPost,
-  planFreeSlots,
-  refreshOpenPosts,
-  resolveAccountIds,
-  saveCachedPosts,
-  savePrefs,
-  syncPostsFromLake,
-  type CreateJob,
-  type LakePost,
-  type PostlakePrefs,
-  type PostlakeStatus,
-} from "./lib/postlake";
-import {
-  createBufferPosts,
-  fetchBufferStatus,
-  makeBufferLocalPost,
-  refreshOpenBufferPosts,
-  resolveBufferChannelIds,
-  syncBufferPosts,
-  type BufferCreateJob,
-  type BufferStatus,
-} from "./lib/buffer";
-import {
-  loadDispatchProvider,
-  saveDispatchProvider,
-  type DispatchProvider,
-} from "./lib/dispatch";
-import {
-  loadAutopilotConfig,
-  loadAutopilotStats,
-  msUntilNextDispatch,
-  recordDispatch,
-  saveAutopilotConfig,
-  saveAutopilotStats,
-  type AutopilotConfig,
-  type AutopilotLogEntry,
-  type AutopilotStats,
-} from "./lib/autopilot";
-import { uploadClipForBuffer, uploadClipForPostlake } from "./lib/upload";
 import { synthesizeSpeech } from "./lib/tts";
 import { recorderSupported, renderLocal } from "./lib/renderer";
 import {
@@ -133,19 +83,6 @@ const IDLE_FETCH: FetchState = {
   platform: null,
 };
 
-interface DispatchJob {
-  key: string;
-  blob: Blob;
-  mime: string;
-  index: number;
-  round: number;
-  text: string;
-  title: string;
-  hashtags: string[];
-  attempts: number;
-  previewUrl: string;
-}
-
 type AnyAudioContext = typeof AudioContext;
 
 export default function App() {
@@ -174,43 +111,9 @@ export default function App() {
   const [activeProgress, setActiveProgress] = useState(0);
   const [ideaGenAll, setIdeaGenAll] = useState(false);
   const [ideaGenIndex, setIdeaGenIndex] = useState<number | null>(null);
-
-  /* social layer: Postlake + Buffer (Versandweg wählbar) */
-  const [lakePosts, setLakePosts] = useState<LakePost[]>(() => loadCachedPosts());
-  const [lakeStatus, setLakeStatus] = useState<PostlakeStatus>({
-    hasApiKey: false,
-    apiStatus: "missing_key",
-    me: null,
-    credits: null,
-    billing: null,
-    accounts: [],
-  });
-  const [bufferStatus, setBufferStatus] = useState<BufferStatus>({
-    hasApiKey: false,
-    apiStatus: "missing_key",
-    me: null,
-    organizations: [],
-    accounts: [],
-  });
-  const [lakeLoading, setLakeLoading] = useState(false);
-  const [prefs, setPrefsState] = useState<PostlakePrefs>(() => loadPrefs());
-  const [dispatchProvider, setDispatchProviderState] = useState<DispatchProvider>(() =>
-    loadDispatchProvider()
-  );
   const [vaultReady, setVaultReady] = useState(false);
 
-  /* autopilot */
-  const [apConfig, setApConfigState] = useState<AutopilotConfig>(() => loadAutopilotConfig());
-  const [apRunning, setApRunning] = useState(false);
-  const [apStats, setApStats] = useState<AutopilotStats>(() => loadAutopilotStats());
-  const [apLog, setApLog] = useState<AutopilotLogEntry[]>([]);
-  const [apQueueDepth, setApQueueDepth] = useState(0);
-  const [apPosting, setApPosting] = useState(false);
-
   const factoryRef = useRef<HTMLDivElement>(null);
-  const calendarRef = useRef<HTMLDivElement>(null);
-  const postRef = useRef<HTMLDivElement>(null);
-  const analyticsRef = useRef<HTMLDivElement>(null);
   const settingsRef = useRef<HTMLDivElement>(null);
 
   const bgsRef = useRef(bgs);
@@ -226,41 +129,8 @@ export default function App() {
   const startedAtRef = useRef<number | null>(null);
   const audioCtxRef = useRef<AudioContext | null>(null);
   const cancelRef = useRef<{ cancelled: boolean }>({ cancelled: false });
-
-  /* frische Spiegel für den Autopilot-Loop (keine stale closures) */
-  const ideasRef = useRef(ideas);
-  ideasRef.current = ideas;
-  const settingsStateRef = useRef(settings);
-  settingsStateRef.current = settings;
   const phaseRef = useRef<Phase>("idle");
   phaseRef.current = phase;
-  const modeRef = useRef(mode);
-  modeRef.current = mode;
-  const lakeStatusRef = useRef(lakeStatus);
-  lakeStatusRef.current = lakeStatus;
-  const bufferStatusRef = useRef(bufferStatus);
-  bufferStatusRef.current = bufferStatus;
-  const lakePostsRef = useRef(lakePosts);
-  lakePostsRef.current = lakePosts;
-  const prefsRef = useRef(prefs);
-  prefsRef.current = prefs;
-  const apConfigRef = useRef(apConfig);
-  apConfigRef.current = apConfig;
-
-  /* autopilot-laufzeit */
-  const apRunningRef = useRef(false);
-  const apRunIdRef = useRef(0);
-  const apRoundRef = useRef(0);
-  const apQueueRef = useRef<DispatchJob[]>([]);
-  const apQueuedKeys = useRef<Set<string>>(new Set());
-  const apPostingRef = useRef(false);
-  const apAccountRef = useRef<string[]>([]);
-  const wakeLockRef = useRef<{ release: () => Promise<void> } | null>(null);
-  const prepareRef = useRef<(ideasOverride?: string[]) => Promise<number>>(async () => 0);
-  const renderRef = useRef<(indexes: number[], viaAutopilot?: boolean) => Promise<void>>(
-    async () => {}
-  );
-  const resliceRef = useRef<(() => void) | null>(null);
 
   useEffect(() => saveSettings(settings), [settings]);
 
@@ -310,50 +180,9 @@ export default function App() {
     };
   }, []);
 
-  /* ---- Social: Status + Posts beider Versandwege laden ---- */
-  const syncSocial = useCallback(async () => {
-    setLakeLoading(true);
-    try {
-      const [st, bst] = await Promise.all([fetchStatus(), fetchBufferStatus()]);
-      setLakeStatus(st);
-      setBufferStatus(bst);
-      // Nacheinander: beide Syncs teilen sich denselben lokalen Spiegel
-      if (st.hasApiKey && st.apiStatus === "connected") {
-        const { posts } = await syncPostsFromLake({ limit: 100 });
-        setLakePosts(posts);
-      }
-      if (bst.hasApiKey && bst.apiStatus === "connected") {
-        const { posts } = await syncBufferPosts({ limit: 100 });
-        setLakePosts(posts);
-      }
-    } catch (e) {
-      console.warn("social sync failed", e);
-    } finally {
-      setLakeLoading(false);
-    }
-  }, []);
-
-  useEffect(() => {
-    /* Erst wenn das Gate offen ist (entsperrt oder ohne APP_PASSWORD) —
-       sonst laufen die Social-Calls gegen 401. */
-    if (!gate.open) return;
-    void syncSocial();
-  }, [gate.open, syncSocial]);
-
-  /* Autopilot-Worker beim Unmount garantiert beenden */
-  useEffect(() => {
-    return () => {
-      apRunIdRef.current++;
-      apRunningRef.current = false;
-    };
-  }, []);
-
   const jumpTo = useCallback((section: NavSection) => {
     const map: Record<NavSection, React.RefObject<HTMLDivElement | null>> = {
       create: factoryRef,
-      post: postRef,
-      calendar: calendarRef,
-      analytics: analyticsRef,
       settings: settingsRef,
     };
     map[section]?.current?.scrollIntoView({ behavior: "smooth", block: "start" });
@@ -623,17 +452,6 @@ export default function App() {
 
   const canPrepare = blockers.length === 0;
 
-  /* Autopilot braucht nur Footage + Recorder — Titel schreibt er selbst */
-  const autopilotBlockers = useMemo(() => {
-    const out: string[] = [];
-    if (!footageReady)
-      out.push(mode === "single" ? "LOAD A SOURCE VIDEO" : `${readyBgs.length}/10 CLIPS LOADED`);
-    if (!recorderSupported()) out.push("BROWSER CANNOT RECORD VIDEO");
-    if (busy) out.push("MANUAL RUN IN PROGRESS");
-    return out;
-  }, [footageReady, mode, readyBgs.length, busy]);
-  const canAutostart = autopilotBlockers.length === 0 && !apRunning;
-
   const patchItem = useCallback((index: number, patch: Partial<LocalRenderItem>) => {
     setItems((prev) => prev.map((r) => (r.index === index ? { ...r, ...patch } : r)));
   }, []);
@@ -642,15 +460,12 @@ export default function App() {
   /*  STEP ① prepare — scripts + voices only                       */
   /* ------------------------------------------------------------ */
 
-  const prepare = useCallback(async (ideasOverride?: string[]): Promise<number> => {
-    /* Guards über Ref (stale-closure-sicher für den Autopilot-Loop) */
-    if (apRunningRef.current && ideasOverride === undefined) return 0;
+  const prepare = useCallback(async (): Promise<number> => {
     if (phaseRef.current === "preparing" || phaseRef.current === "rendering") return 0;
-    const ideaList = ideasOverride ?? ideas;
-    const listReady = ideaList.length === 10 && ideaList.every((i) => i.trim().length > 2);
+    const listReady = ideas.length === 10 && ideas.every((i) => i.trim().length > 2);
     const readyCount = bgsRef.current.filter((b) => b.status === "ready").length;
     const footageOk =
-      modeRef.current === "single"
+      mode === "single"
         ? !!sourceRef.current && clipsRef.current.length === 10
         : readyCount === 10;
     if (!listReady || !footageOk || !recorderSupported()) return 0;
@@ -669,7 +484,7 @@ export default function App() {
     phaseRef.current = "preparing";
     setPhase("preparing");
 
-    const seeded: LocalRenderItem[] = ideaList.map((idea, index) => ({
+    const seeded: LocalRenderItem[] = ideas.map((idea, index) => ({
       index,
       idea: idea.trim(),
       status: "script",
@@ -729,16 +544,15 @@ export default function App() {
     if (staged === 0)
       setError("Nothing could be prepared — voice synthesis needs an internet connection.");
     return staged;
-  }, [ideas, settings, patchItem, ensureAudioCtx]);
+  }, [ideas, settings, mode, patchItem, ensureAudioCtx]);
 
   /* ------------------------------------------------------------ */
   /*  STEP ② render — explicit, per unit or all                    */
   /* ------------------------------------------------------------ */
 
   const renderIndexes = useCallback(
-    async (indexes: number[], viaAutopilot = false) => {
+    async (indexes: number[]) => {
       if (indexes.length === 0) return;
-      if (apRunningRef.current && !viaAutopilot) return;
       if (phaseRef.current === "preparing" || phaseRef.current === "rendering") return;
       setError(null);
       cancelRef.current = { cancelled: false };
@@ -823,7 +637,7 @@ export default function App() {
               : "failed"
       );
     },
-    [busy, ensureAudioCtx, settings, mode, readyBgs, musicFile, patchItem]
+    [ensureAudioCtx, settings, mode, readyBgs, musicFile, patchItem]
   );
 
   const renderAll = useCallback(() => {
@@ -843,709 +657,6 @@ export default function App() {
   const cancel = useCallback(() => {
     cancelRef.current.cancelled = true;
   }, []);
-
-  /* Stabile Funktions-Spiegel für die Autopilot-Worker (Long-Running-Loops) */
-  useEffect(() => {
-    prepareRef.current = prepare;
-    renderRef.current = renderIndexes;
-    resliceRef.current = reslice;
-  });
-
-  /* ------------------------------------------------------------ */
-  /*  posting prefs + autopilot state helpers                       */
-  /* ------------------------------------------------------------ */
-
-  const setPrefs = useCallback((p: PostlakePrefs) => {
-    setPrefsState(p);
-    savePrefs(p);
-  }, []);
-
-  const setDispatchProvider = useCallback((p: DispatchProvider) => {
-    setDispatchProviderState(p);
-    saveDispatchProvider(p);
-  }, []);
-
-  const setApConfig = useCallback((c: AutopilotConfig) => {
-    setApConfigState(c);
-    saveAutopilotConfig(c);
-  }, []);
-
-  const apLogIt = useCallback((kind: AutopilotLogEntry["kind"], text: string) => {
-    setApLog((prev) => [...prev.slice(-199), { at: Date.now(), kind, text }]);
-  }, []);
-
-  const bumpStats = useCallback((updater: (prev: AutopilotStats) => Partial<AutopilotStats>) => {
-    setApStats((prev) => {
-      const next = { ...prev, ...updater(prev), lastActivityAt: Date.now() };
-      saveAutopilotStats(next);
-      return next;
-    });
-  }, []);
-
-  /* ------------------------------------------------------------ */
-  /*  POST ALL / POST — Versandweg wählbar: Postlake oder Buffer     */
-  /*  (Auswahl passiert im DispatchChooser beim Klick)               */
-  /* ------------------------------------------------------------ */
-
-  const postItems = useCallback(
-    async (targets: LocalRenderItem[], via: DispatchProvider) => {
-      const videos = targets.filter((t) => t.status === "done" && t.blob && !t.posting);
-      if (videos.length === 0 || apRunningRef.current) return;
-      setDispatchProvider(via);
-
-      /* ---------------- BUFFER-WEG ---------------- */
-      if (via === "buffer") {
-        const p = prefsRef.current;
-        const { ids, missing } = resolveBufferChannelIds(
-          p.platforms,
-          bufferStatusRef.current.accounts,
-          p.bufferAccountIds
-        );
-        if (ids.length === 0) {
-          setError(
-            missing.length > 0
-              ? `Keine Buffer-Kanäle für ${missing.join(", ")} verbunden — bitte erst in Buffer (publish.buffer.com → Channels) verbinden und SYNC drücken.`
-              : "Keine Buffer-Kanäle verbunden — bitte erst verbinden und SYNC drücken."
-          );
-          return;
-        }
-        if (missing.length > 0) {
-          setError(
-            `Hinweis: keine Buffer-Kanäle für ${missing.join(", ")} — poste auf ${ids.length} Kanal/Kanäle.`
-          );
-        } else {
-          setError(null);
-        }
-
-        for (const v of videos) patchItem(v.index, { posting: true, postError: null });
-
-        try {
-          const order: number[] = [];
-          const jobs: BufferCreateJob[] = [];
-          const slots =
-            p.mode === "scheduled"
-              ? planFreeSlots(lakePostsRef.current, {
-                  count: videos.length,
-                  preferredTimes: p.preferredTimes,
-                  timezone: p.timezone,
-                })
-              : [];
-
-          for (let k = 0; k < videos.length; k++) {
-            const v = videos[k];
-            let videoUrl = "";
-            try {
-              // Buffer-Pflicht: öffentliche, stabile HTTPS-URL (Supabase-Hosting)
-              videoUrl = await uploadClipForBuffer(v.blob!, `manual-${v.index}`, v.mime);
-            } catch (uploadErr) {
-              // Ohne Key: kein Versand möglich → lokal zwischenspeichern statt scheitern
-              if (bufferStatusRef.current.hasApiKey) throw uploadErr;
-            }
-            const tagList = hashtagsToList(p.hashtags);
-            const caption = (p.caption || v.idea || "").trim();
-            const stamp = Date.now();
-            const rand = Math.random().toString(36).slice(2, 7);
-            const localId = `buf_${stamp}_${v.index}_${rand}`;
-            const slot = slots[k];
-            order.push(v.index);
-            jobs.push({
-              localId,
-              text: [caption, tagList.join(" ")].filter(Boolean).join("\n\n"),
-              title: (v.idea || `Short ${v.index + 1}`).slice(0, 90),
-              hashtags: tagList,
-              channelIds: ids,
-              videoUrl,
-              previewUrl: v.blobUrl,
-              ...(slot ? { scheduledAtISO: slot.scheduledAt, timezone: p.timezone } : {}),
-              idempotencyKey: `${localId}_key`,
-            });
-          }
-
-          const res = await createBufferPosts(jobs);
-          setLakePosts(res.posts);
-
-          for (let k = 0; k < order.length; k++) {
-            const idx = order[k];
-            const post = res.posts.find((x) => x.id === jobs[k].localId);
-            if (post && post.status !== "Fehler") {
-              patchItem(idx, {
-                posting: false,
-                posted: true,
-                postedVia: "buffer",
-                postlakePostId: null,
-                postError: null,
-              });
-            } else {
-              patchItem(idx, {
-                posting: false,
-                postError:
-                  post?.errorMessage ||
-                  res.error ||
-                  "Buffer-Versand fehlgeschlagen — Details im Kalender.",
-              });
-            }
-          }
-
-          if (!res.hasApiKey) {
-            setError(
-              "BUFFER_API_KEY fehlt: Posts wurden lokal zwischengespeichert (Kalender) und gehen live, sobald der Key gesetzt ist."
-            );
-          } else if (res.failed > 0) {
-            setError(
-              `${res.failed} von ${jobs.length} Buffer-Posts meldeten Fehler — Details im Kalender, dort ggf. erneut posten.`
-            );
-          }
-        } catch (e) {
-          const msg = e instanceof Error ? e.message : String(e);
-          for (const v of videos) patchItem(v.index, { posting: false, postError: msg });
-          setError(`Buffer-Posten abgebrochen: ${msg}`);
-        }
-        return;
-      }
-
-      /* ---------------- POSTLAKE-WEG ---------------- */
-      const p = prefsRef.current;
-      const { ids, missing } = resolveAccountIds(
-        p.platforms,
-        lakeStatusRef.current.accounts,
-        p.accountIds
-      );
-      if (ids.length === 0) {
-        setError(
-          missing.length > 0
-            ? `Keine Kanäle für ${missing.join(", ")} verbunden — bitte erst in Postlake (app.postlake.dev → Channels) verbinden und SYNC drücken.`
-            : "Keine Postlake-Kanäle verbunden — bitte erst verbinden und SYNC drücken."
-        );
-        return;
-      }
-      if (missing.length > 0) {
-        setError(
-          `Hinweis: keine Kanäle für ${missing.join(", ")} — poste auf ${ids.length} Kanal/Kanäle.`
-        );
-      } else {
-        setError(null);
-      }
-
-      for (const v of videos) patchItem(v.index, { posting: true, postError: null });
-
-      try {
-        const order: number[] = [];
-        const jobs: CreateJob[] = [];
-        const slots =
-          p.mode === "scheduled"
-            ? planFreeSlots(lakePostsRef.current, {
-                count: videos.length,
-                preferredTimes: p.preferredTimes,
-                timezone: p.timezone,
-              })
-            : [];
-
-        for (let k = 0; k < videos.length; k++) {
-          const v = videos[k];
-          let mediaId = "";
-          try {
-            mediaId = await uploadClipForPostlake(v.blob!, `manual-${v.index}`, v.mime);
-          } catch (uploadErr) {
-            // Ohne Key: kein Upload möglich → lokal zwischenspeichern statt scheitern
-            if (lakeStatusRef.current.hasApiKey) throw uploadErr;
-          }
-          const tagList = hashtagsToList(p.hashtags);
-          const caption = (p.caption || v.idea || "").trim();
-          const stamp = Date.now();
-          const rand = Math.random().toString(36).slice(2, 7);
-          const localId = `lake_${stamp}_${v.index}_${rand}`;
-          const slot = slots[k];
-          order.push(v.index);
-          jobs.push({
-            localId,
-            text: [caption, tagList.join(" ")].filter(Boolean).join("\n\n"),
-            title: (v.idea || `Short ${v.index + 1}`).slice(0, 90),
-            hashtags: tagList,
-            accounts: ids,
-            media: mediaId ? [mediaId] : [],
-            previewUrl: v.blobUrl,
-            ...(slot ? { scheduledAt: slot.naive, timezone: p.timezone } : {}),
-            idempotencyKey: `${localId}_key`,
-          });
-        }
-
-        const res = await createPosts(jobs);
-        setLakePosts(res.posts);
-
-        for (let k = 0; k < order.length; k++) {
-          const idx = order[k];
-          const post = res.posts.find((x) => x.id === jobs[k].localId);
-          if (post && post.status !== "Fehler") {
-            patchItem(idx, {
-              posting: false,
-              posted: true,
-              postedVia: "postlake",
-              postlakePostId: post.postlakeId,
-              postError: null,
-            });
-          } else {
-            patchItem(idx, {
-              posting: false,
-              postError:
-                post?.errorMessage ||
-                res.error ||
-                "Versand fehlgeschlagen — Details im Kalender.",
-            });
-          }
-        }
-
-        if (!res.hasApiKey) {
-          setError(
-            "POSTLAKE_API_KEY fehlt: Posts wurden lokal zwischengespeichert (Kalender) und gehen live, sobald der Key gesetzt ist."
-          );
-        } else if (res.failed > 0) {
-          setError(
-            `${res.failed} von ${jobs.length} Posts meldeten Fehler — Details im Kalender, dort ggf. erneut posten.`
-          );
-        }
-      } catch (e) {
-        const msg = e instanceof Error ? e.message : String(e);
-        for (const v of videos) patchItem(v.index, { posting: false, postError: msg });
-        setError(`Posten abgebrochen: ${msg}`);
-      }
-    },
-    [patchItem, setDispatchProvider]
-  );
-
-  /* ------------------------------------------------------------ */
-  /*  AUTOPILOT — rendern + posten ohne Klick                       */
-  /* ------------------------------------------------------------ */
-
-  const stopAutopilot = useCallback(
-    (auto = false) => {
-      apRunIdRef.current++;
-      apRunningRef.current = false;
-      setApRunning(false);
-      setApPosting(false);
-      apPostingRef.current = false;
-      cancelRef.current.cancelled = true;
-      try {
-        void wakeLockRef.current?.release();
-      } catch {
-        /* ignore */
-      }
-      wakeLockRef.current = null;
-      if (auto) {
-        apLogIt("ok", "Autopilot fertig: Runde abgeschlossen, Sende-Queue leer.");
-      } else {
-        apLogIt(
-          "warn",
-          `Autopilot gestoppt — ${apQueueRef.current.length} Video(s) bleiben in der Queue für den Neustart.`
-        );
-      }
-    },
-    [apLogIt]
-  );
-
-  /** Produktions-Loop: Ideen → Prepare → Render → Queue → (nächste Runde). */
-  const runAutopilotLoop = useCallback(async () => {
-    const runId = apRunIdRef.current;
-    const alive = () => apRunningRef.current && apRunIdRef.current === runId;
-
-    // Kanäle frisch auflösen (je nach Auto-Provider: Postlake oder Buffer)
-    try {
-      const wanted = apConfigRef.current;
-      const via = wanted.provider;
-      const label = via === "buffer" ? "Buffer" : "Postlake";
-      const [st, bst] = await Promise.all([fetchStatus(), fetchBufferStatus()]);
-      if (!alive()) return;
-      setLakeStatus(st);
-      setBufferStatus(bst);
-      const { ids, missing } =
-        via === "buffer"
-          ? resolveBufferChannelIds(wanted.platforms, bst.accounts, wanted.bufferAccountIds)
-          : resolveAccountIds(wanted.platforms, st.accounts, wanted.accountIds);
-      apAccountRef.current = ids;
-      if (missing.length > 0) {
-        apLogIt("warn", `Keine ${label}-Kanäle für: ${missing.join(", ")} — poste auf ${ids.length} Kanal/Kanäle.`);
-      }
-      if (ids.length === 0) {
-        const hasKey = via === "buffer" ? bst.hasApiKey : st.hasApiKey;
-        apLogIt(
-          "warn",
-          hasKey
-            ? `Keine ${label}-Kanäle verbunden — Videos werden nur lokal zwischengespeichert.`
-            : `Kein ${via === "buffer" ? "BUFFER_API_KEY" : "POSTLAKE_API_KEY"} — Videos werden nur lokal zwischengespeichert.`
-        );
-      }
-      if (via === "postlake") {
-        const credits = st.credits?.total;
-        if (typeof credits === "number") {
-          apLogIt(
-            credits <= 10 ? "warn" : "info",
-            `Postlake-Guthaben: ${credits} Credits (1 Credit pro Kanal-Post).`
-          );
-        }
-      } else if (ids.length > 0) {
-        apLogIt("info", `Buffer bereit: ${ids.length} Kanal/Kanäle (${bst.organizations[0]?.name || "Workspace"}).`);
-      }
-    } catch (e) {
-      apLogIt("warn", `Kanal-Sync fehlgeschlagen: ${e instanceof Error ? e.message : e}`);
-    }
-
-    while (alive()) {
-      apRoundRef.current++;
-      const round = apRoundRef.current;
-      bumpStats(() => ({ rounds: round }));
-
-      // Rückstau-Schutz: Bytes leben im Speicher — max. 30 wartende Videos
-      while (alive() && apQueueRef.current.length >= 30) {
-        apLogIt("info", "Sende-Queue voll (30) — warte auf Versand, bevor es weitergeht …");
-        await sleep(15000);
-      }
-      if (!alive()) break;
-
-      try {
-        // 1) Ideen sichern (sonst frische schreiben lassen)
-        let ideaList = ideasRef.current;
-        if (!(ideaList.length === 10 && ideaList.every((i) => i.trim().length > 2))) {
-          apLogIt("info", `Runde ${round}: schreibe 10 neue Titel …`);
-          const s = settingsStateRef.current;
-          const { ideas: fresh } = await generateIdeas(10, {
-            qwenKey: s.qwenKey,
-            mistralKey: s.mistralKey,
-            words: s.storyWords,
-            temperature: s.temperature,
-            styleInstruction: styleInstruction(s),
-          });
-          if (!alive()) break;
-          ideaList = (fresh.length >= 10 ? fresh.slice(0, 10) : [...fresh, ...ideaList]).slice(0, 10);
-          setIdeas(ideaList);
-        }
-
-        // Ab Runde 2: neue Clip-Fenster für Abwechslung
-        if (round > 1 && modeRef.current === "single" && sourceRef.current) {
-          resliceRef.current?.();
-        }
-
-        // 2) Scripts + Voices
-        apLogIt("info", `Runde ${round}: Scripts + Voices …`);
-        const staged = await prepareRef.current(ideaList);
-        if (!alive()) break;
-        if (!staged || staged <= 0) {
-          apLogIt("error", "Prepare brachte nichts — warte 30 s, dann erneut.");
-          await sleep(30000);
-          continue;
-        }
-
-        // 3) Rendern
-        const targets = itemsRef.current
-          .filter((i) => i.status === "staged")
-          .map((i) => i.index);
-        apLogIt("info", `Runde ${round}: rendere ${targets.length} Videos …`);
-        await renderRef.current(targets, true);
-        if (!alive()) break;
-
-        // 4) Fertige in die Sende-Queue
-        const dones = itemsRef.current.filter((i) => i.status === "done" && i.blob);
-        bumpStats((prev) => ({ totalRendered: prev.totalRendered + dones.length }));
-        const cfg2 = apConfigRef.current;
-        const tagList = hashtagsToList(cfg2.hashtags);
-        let queued = 0;
-        for (const d of dones) {
-          if (d.posted) continue;
-          const key = `${round}:${d.index}`;
-          if (apQueuedKeys.current.has(key)) continue;
-          apQueuedKeys.current.add(key);
-          const caption = (cfg2.caption || d.idea || "").trim();
-          apQueueRef.current.push({
-            key,
-            round,
-            index: d.index,
-            blob: d.blob!,
-            mime: d.mime || "video/mp4",
-            title: (d.idea || `Short ${d.index + 1}`).slice(0, 90),
-            text: [caption, tagList.join(" ")].filter(Boolean).join("\n\n"),
-            hashtags: tagList,
-            previewUrl: d.blobUrl || "",
-            attempts: 0,
-          });
-          queued++;
-        }
-        setApQueueDepth(apQueueRef.current.length);
-        apLogIt(
-          "ok",
-          `Runde ${round}: ${dones.length} Videos fertig, ${queued} eingereiht (Queue: ${apQueueRef.current.length}).`
-        );
-
-        if (!cfg2.loopRounds) {
-          apLogIt("info", "Endlos-Modus aus — warte bis die Queue leer ist …");
-          while (alive() && (apQueueRef.current.length > 0 || apPostingRef.current)) {
-            await sleep(1000);
-          }
-          break;
-        }
-        await sleep(2000);
-      } catch (e) {
-        apLogIt("error", `Runde ${round} abgebrochen: ${e instanceof Error ? e.message : String(e)}`);
-        await sleep(10000);
-      }
-    }
-
-    if (apRunningRef.current && apRunIdRef.current === runId) {
-      stopAutopilot(true);
-    }
-  }, [apLogIt, bumpStats, stopAutopilot]);
-
-  /** Versand-Worker: ein Video nach dem anderen, im Stunden-Limit. */
-  const runDispatchWorker = useCallback(async () => {
-    const runId = apRunIdRef.current;
-    const alive = () => apRunningRef.current && apRunIdRef.current === runId;
-
-    while (alive()) {
-      const job = apQueueRef.current[0];
-      if (!job) {
-        await sleep(1000);
-        continue;
-      }
-
-      // Stunden-Limit einhalten (in 1-s-Scheiben, damit STOP sofort greift)
-      let wait = msUntilNextDispatch(apConfigRef.current.videosPerHour);
-      while (alive() && wait > 0) {
-        const slice = Math.min(wait, 1000);
-        await sleep(slice);
-        wait -= slice;
-      }
-      if (!alive()) break;
-      const head = apQueueRef.current[0];
-      if (!head || head.key !== job.key) continue;
-
-      setApPosting(true);
-      apPostingRef.current = true;
-      const sameRound = () => apRoundRef.current === job.round;
-      if (sameRound()) patchItem(job.index, { posting: true, postError: null });
-
-      try {
-        const cfg = apConfigRef.current;
-        const via = cfg.provider;
-        const label = via === "buffer" ? "Buffer" : "Postlake";
-        const accounts =
-          apAccountRef.current.length > 0
-            ? apAccountRef.current
-            : via === "buffer"
-              ? resolveBufferChannelIds(cfg.platforms, bufferStatusRef.current.accounts, cfg.bufferAccountIds).ids
-              : resolveAccountIds(cfg.platforms, lakeStatusRef.current.accounts, cfg.accountIds).ids;
-        // Kanäle können mid-run dazukommen (Poller aktualisiert den Status)
-        if (accounts.length > 0) apAccountRef.current = accounts;
-
-        let scheduledNaive: string | undefined;
-        let scheduledISO: string | undefined;
-        const timezone = "Europe/Berlin";
-        if (cfg.mode === "scheduled") {
-          const slot = planFreeSlots(lakePostsRef.current, {
-            count: 1,
-            preferredTimes: ["06:00", "20:00"],
-            timezone,
-          })[0];
-          if (slot) {
-            scheduledNaive = slot.naive;
-            scheduledISO = slot.scheduledAt;
-          }
-        }
-
-        // Keine Kanäle (kein Key / nichts verbunden): lokal cachen, nichts verlieren
-        if (accounts.length === 0) {
-          // Stabile ID pro Job: Retries teilen sich Key + Idempotency (kein Doppel-Post)
-          const localId = `${via === "buffer" ? "buf" : "lake"}_auto_${job.key.replace(":", "_")}`;
-          const local =
-            via === "buffer"
-              ? makeBufferLocalPost({
-                  localId,
-                  text: job.text,
-                  title: job.title,
-                  hashtags: job.hashtags,
-                  channelIds: [],
-                  videoUrl: "",
-                  previewUrl: job.previewUrl,
-                  ...(scheduledISO ? { scheduledAtISO: scheduledISO, timezone } : {}),
-                  idempotencyKey: `${localId}_key`,
-                })
-              : makeLocalPost({
-                  localId,
-                  text: job.text,
-                  title: job.title,
-                  hashtags: job.hashtags,
-                  accounts: [],
-                  media: [],
-                  previewUrl: job.previewUrl,
-                  ...(scheduledNaive ? { scheduledAt: scheduledNaive, timezone } : {}),
-                  idempotencyKey: `${localId}_key`,
-                });
-          const merged = [local, ...lakePostsRef.current].slice(0, 500);
-          saveCachedPosts(merged);
-          setLakePosts(merged);
-          recordDispatch();
-          apQueueRef.current.shift();
-          setApQueueDepth(apQueueRef.current.length);
-          bumpStats((prev) => ({ totalPosted: prev.totalPosted + 1 }));
-          if (sameRound()) {
-            patchItem(job.index, { posting: false, posted: true, postedVia: via, postlakePostId: null, postError: null });
-          }
-          apLogIt("warn", `Video #${job.index + 1} (R${job.round}) lokal zwischengespeichert (keine Kanäle).`);
-          continue;
-        }
-
-        apLogIt("info", `Lade Video #${job.index + 1} (R${job.round}) hoch …`);
-        const cacheKey = `auto-r${job.round}-${job.index}`;
-        const localId = `${via === "buffer" ? "buf" : "lake"}_auto_${job.key.replace(":", "_")}`;
-        let res: { posts: LakePost[]; hasApiKey: boolean; error?: string };
-        if (via === "buffer") {
-          // Buffer: erst ins Supabase-Hosting (öffentliche URL), dann 1 Mutation pro Kanal
-          const videoUrl = await uploadClipForBuffer(job.blob, cacheKey, job.mime);
-          if (!alive()) {
-            if (sameRound()) patchItem(job.index, { posting: false });
-            break;
-          }
-          res = await createBufferPosts([
-            {
-              localId,
-              text: job.text,
-              title: job.title,
-              hashtags: job.hashtags,
-              channelIds: accounts,
-              videoUrl,
-              previewUrl: job.previewUrl,
-              ...(scheduledISO ? { scheduledAtISO: scheduledISO, timezone } : {}),
-              idempotencyKey: `${localId}_key`,
-            },
-          ]);
-        } else {
-          const mediaId = await uploadClipForPostlake(job.blob, cacheKey, job.mime);
-          if (!alive()) {
-            if (sameRound()) patchItem(job.index, { posting: false });
-            break;
-          }
-          res = await createPosts([
-            {
-              localId,
-              text: job.text,
-              title: job.title,
-              hashtags: job.hashtags,
-              accounts,
-              media: [mediaId],
-              previewUrl: job.previewUrl,
-              ...(scheduledNaive ? { scheduledAt: scheduledNaive, timezone } : {}),
-              idempotencyKey: `${localId}_key`,
-            },
-          ]);
-        }
-        setLakePosts(res.posts);
-        recordDispatch();
-        apQueueRef.current.shift();
-        setApQueueDepth(apQueueRef.current.length);
-
-        const created = res.posts.find((x) => x.id === localId);
-        if (created && created.status !== "Fehler") {
-          bumpStats((prev) => ({ totalPosted: prev.totalPosted + 1 }));
-          if (sameRound()) {
-            patchItem(job.index, {
-              posting: false,
-              posted: true,
-              postedVia: via,
-              postlakePostId: created.postlakeId,
-              postError: null,
-            });
-          }
-          apLogIt(
-            "ok",
-            res.hasApiKey
-              ? `Video #${job.index + 1} (R${job.round}) → ${label} (${created.status}).`
-              : `Video #${job.index + 1} (R${job.round}) lokal zwischengespeichert (kein Key).`
-          );
-        } else {
-          throw new Error(created?.errorMessage || res.error || "Versand fehlgeschlagen.");
-        }
-      } catch (e) {
-        const msg = e instanceof Error ? e.message : String(e);
-        job.attempts++;
-        if (job.attempts >= 3) {
-          apQueueRef.current.shift();
-          bumpStats((prev) => ({ totalFailed: prev.totalFailed + 1 }));
-          if (sameRound()) patchItem(job.index, { posting: false, postError: msg });
-          apLogIt("error", `Video #${job.index + 1} (R${job.round}) aufgegeben: ${msg}`);
-        } else {
-          apQueueRef.current.push(apQueueRef.current.shift()!);
-          apLogIt("warn", `Versuch ${job.attempts}/3 für Video #${job.index + 1} (R${job.round}) fehlgeschlagen: ${msg}`);
-          await sleep(5000);
-        }
-        setApQueueDepth(apQueueRef.current.length);
-      } finally {
-        setApPosting(false);
-        apPostingRef.current = false;
-      }
-    }
-  }, [apLogIt, bumpStats, patchItem]);
-
-  /** Status-Poller: offene Posts + Credits aktuell halten. */
-  const runStatusPoller = useCallback(async () => {
-    const runId = apRunIdRef.current;
-    const alive = () => apRunningRef.current && apRunIdRef.current === runId;
-    while (alive()) {
-      await sleep(60000);
-      if (!alive()) break;
-      if (!apConfigRef.current.pollStatus) continue;
-      try {
-        // Nacheinander: beide teilen sich denselben lokalen Spiegel
-        const lake = await refreshOpenPosts();
-        const buf = await refreshOpenBufferPosts();
-        const refreshed = lake.refreshed + buf.refreshed;
-        if (refreshed > 0) {
-          setLakePosts(buf.posts);
-          apLogIt("info", `${refreshed} Post-Status bei Postlake/Buffer aktualisiert.`);
-        }
-        const [st, bst] = await Promise.all([fetchStatus(), fetchBufferStatus()]);
-        if (alive()) {
-          setLakeStatus(st);
-          setBufferStatus(bst);
-        }
-      } catch {
-        /* still, still — nächster Tick */
-      }
-    }
-  }, [apLogIt]);
-
-  const startAutopilot = useCallback(() => {
-    if (apRunningRef.current) return;
-    const readyCount = bgsRef.current.filter((b) => b.status === "ready").length;
-    const footageOk =
-      modeRef.current === "single"
-        ? !!sourceRef.current && clipsRef.current.length === 10
-        : readyCount === 10;
-    if (!footageOk || !recorderSupported()) return;
-    if (phaseRef.current === "preparing" || phaseRef.current === "rendering") return;
-
-    apRunIdRef.current++;
-    apRunningRef.current = true;
-    apRoundRef.current = 0;
-    setApRunning(true);
-    bumpStats(() => ({ startedAt: Date.now(), rounds: 0 }));
-    const cfg = apConfigRef.current;
-    apLogIt(
-      "info",
-      `Autopilot gestartet — Limit ${cfg.videosPerHour}/h, Modus ${cfg.mode === "now" ? "Sofort posten" : "Slots planen"}, Kanäle: ${cfg.platforms.join(", ")}.`
-    );
-    try {
-      const nav = navigator as Navigator & {
-        wakeLock?: { request: (t: string) => Promise<{ release: () => Promise<void> }> };
-      };
-      nav.wakeLock
-        ?.request("screen")
-        .then((lock) => {
-          wakeLockRef.current = lock;
-        })
-        .catch(() => {});
-    } catch {
-      /* optional */
-    }
-    void runAutopilotLoop();
-    void runDispatchWorker();
-    void runStatusPoller();
-  }, [apLogIt, bumpStats, runAutopilotLoop, runDispatchWorker, runStatusPoller]);
 
   /* ------------------------------------------------------------ */
   /*  zip dispatch                                                 */
@@ -1622,12 +733,7 @@ export default function App() {
       </div>
       <div className="animate-pulse-heat pointer-events-none absolute -top-40 left-1/2 h-[420px] w-[820px] -translate-x-1/2 rounded-full bg-[radial-gradient(ellipse_at_center,rgba(255,138,31,0.16),transparent_68%)] blur-2xl" />
 
-      <Header
-        phase={phase}
-        keyed={keyed}
-        scheduledCount={lakePosts.length}
-        onJump={jumpTo}
-      />
+      <Header phase={phase} keyed={keyed} onJump={jumpTo} />
 
       <main
         className="relative z-10 mx-auto max-w-[1500px] px-4 pb-16 sm:px-6"
@@ -1707,184 +813,92 @@ export default function App() {
         {/* Zugangsschutz: Verweis (ohne Variable) bzw. Status + SPERREN (mit Variable) */}
         <GateBanner enabled={gate.enabled} checking={gate.checking} onLocked={gate.lock} />
 
-        {/* ---------------- Dashboard header stats ---------------- */}
-        <div className="mb-5">
-          <DashboardStats
-            posts={lakePosts}
-            credits={lakeStatus.credits?.total ?? null}
-            hourLimit={apConfig.videosPerHour}
-            onCreate={() => jumpTo("create")}
+        {/* ---------------- video factory ---------------- */}
+        <div ref={factoryRef} className="grid content-start gap-5 scroll-mt-28">
+          <div ref={settingsRef} className="scroll-mt-28">
+            <SettingsPanel settings={settings} onChange={setSettings} disabled={busy} />
+          </div>
+          <IdeasPanel
+            ideas={ideas}
+            onChange={setIdeas}
+            onGenerateAll={() => void generateAllIdeas()}
+            onGenerateOne={(i) => void generateOneIdea(i)}
+            generatingAll={ideaGenAll}
+            generatingIndex={ideaGenIndex}
+            aiLabel={
+              keyed
+                ? "TAP AI ×10 TO LET QWEN / MISTRAL INVENT ALL TEN TITLES — OR ✨ ON A SINGLE ROW."
+                : "NO API KEY YET — AI ×10 USES THE BUILT-IN OFFLINE TITLE BUILDER. ADD A KEY UNDER 00 FOR REAL AI."
+            }
+            disabled={busy}
           />
-        </div>
+          <ClipMill
+            mode={mode}
+            onModeChange={setMode}
+            source={source}
+            clips={clips}
+            fetchState={fetchState}
+            linkValue={link}
+            onLinkChange={setLink}
+            onLoadLink={loadLink}
+            onPickSource={(f) => void adoptSource(f, "file")}
+            onClearSource={clearSource}
+            onReslice={reslice}
+            onRerollClip={reroll}
+            bgs={bgs}
+            onAddFiles={addBackgrounds}
+            onRemoveFile={(id) => {
+              setBgs((prev) => prev.filter((b) => b.id !== id));
+              void deleteAsset(id);
+            }}
+            onClearFiles={() => {
+              setBgs([]);
+              void clearKind("background");
+            }}
+            disabled={busy}
+          />
+          <MusicPanel
+            tracks={tracks}
+            onAdd={addTracks}
+            onSelect={(id) => {
+              setTracks((prev) => {
+                const next = prev.map((t) => ({ ...t, selected: t.id === id }));
+                for (const t of next) void patchAssetMeta(t.id, { selected: t.selected });
+                return next;
+              });
+            }}
+            onRemove={(id) => {
+              setTracks((prev) => prev.filter((t) => t.id !== id));
+              void deleteAsset(id);
+            }}
+            disabled={busy}
+          />
+          <AssemblyPanel
+            phase={phase}
+            canPrepare={canPrepare}
+            blockers={blockers}
+            stagedCount={stagedCount}
+            doneCount={doneCount}
+            errorCount={errorCount}
+            renderProgress={renderProgress}
+            error={error}
+            onPrepare={() => void prepare()}
+            onRenderAll={renderAll}
+            onCancel={cancel}
+          />
 
-        {/* ================= SPLIT SCREEN: Factory | Social ================= */}
-        <div className="grid gap-5 xl:grid-cols-[minmax(0,1fr)_minmax(0,1fr)] xl:items-start">
-          {/* ---------------- LEFT: video factory ---------------- */}
-          <div
-            ref={factoryRef}
-            className="grid content-start gap-5 scroll-mt-28 xl:max-h-[calc(100vh-7rem)] xl:overflow-y-auto xl:pr-2"
-          >
-            <div ref={settingsRef} className="scroll-mt-28">
-              <SettingsPanel settings={settings} onChange={setSettings} disabled={busy} />
-            </div>
-            <IdeasPanel
-              ideas={ideas}
-              onChange={setIdeas}
-              onGenerateAll={() => void generateAllIdeas()}
-              onGenerateOne={(i) => void generateOneIdea(i)}
-              generatingAll={ideaGenAll}
-              generatingIndex={ideaGenIndex}
-              aiLabel={
-                keyed
-                  ? "TAP AI ×10 TO LET QWEN / MISTRAL INVENT ALL TEN TITLES — OR ✨ ON A SINGLE ROW."
-                  : "NO API KEY YET — AI ×10 USES THE BUILT-IN OFFLINE TITLE BUILDER. ADD A KEY UNDER 00 FOR REAL AI."
-              }
-              disabled={busy || apRunning}
-            />
-            <ClipMill
-              mode={mode}
-              onModeChange={setMode}
-              source={source}
-              clips={clips}
-              fetchState={fetchState}
-              linkValue={link}
-              onLinkChange={setLink}
-              onLoadLink={loadLink}
-              onPickSource={(f) => void adoptSource(f, "file")}
-              onClearSource={clearSource}
-              onReslice={reslice}
-              onRerollClip={reroll}
-              bgs={bgs}
-              onAddFiles={addBackgrounds}
-              onRemoveFile={(id) => {
-                setBgs((prev) => prev.filter((b) => b.id !== id));
-                void deleteAsset(id);
-              }}
-              onClearFiles={() => {
-                setBgs([]);
-                void clearKind("background");
-              }}
-              disabled={busy || apRunning}
-            />
-            <MusicPanel
-              tracks={tracks}
-              onAdd={addTracks}
-              onSelect={(id) => {
-                setTracks((prev) => {
-                  const next = prev.map((t) => ({ ...t, selected: t.id === id }));
-                  for (const t of next) void patchAssetMeta(t.id, { selected: t.selected });
-                  return next;
-                });
-              }}
-              onRemove={(id) => {
-                setTracks((prev) => prev.filter((t) => t.id !== id));
-                void deleteAsset(id);
-              }}
-              disabled={busy || apRunning}
-            />
-            <AssemblyPanel
-              phase={phase}
-              canPrepare={canPrepare}
-              blockers={blockers}
-              stagedCount={stagedCount}
-              doneCount={doneCount}
-              errorCount={errorCount}
-              renderProgress={renderProgress}
-              error={error}
-              disabled={apRunning}
-              onPrepare={() => void prepare()}
-              onRenderAll={renderAll}
-              onCancel={cancel}
-            />
-
-            <OutputPanel
-              phase={phase}
-              items={items}
-              placeholderCount={10}
-              zip={zip}
-              elapsed={elapsed}
-              activeIndex={activeIndex}
-              activeProgress={activeProgress}
-              disabled={apRunning}
-              postMode={prefs.mode}
-              onPostMode={(m) => setPrefs({ ...prefs, mode: m })}
-              onBuildZip={buildZip}
-              onRenderOne={renderOne}
-              onPostItems={(targets, via) => void postItems(targets, via)}
-              dispatchDefault={dispatchProvider}
-              postlakeReady={{
-                hasKey: lakeStatus.hasApiKey,
-                connected:
-                  lakeStatus.apiStatus === "connected" &&
-                  lakeStatus.accounts.some((a) => a.status !== "disconnected"),
-                channels: lakeStatus.accounts.filter((a) => a.status !== "disconnected").length,
-                detail: "1 Call \u2192 alle Kan\u00e4le \u00b7 Upload per signierter PUT-URL.",
-              }}
-              bufferReady={{
-                hasKey: bufferStatus.hasApiKey,
-                connected:
-                  bufferStatus.apiStatus === "connected" &&
-                  bufferStatus.accounts.some((a) => a.status !== "disconnected"),
-                channels: bufferStatus.accounts.filter((a) => a.status !== "disconnected").length,
-                detail: "1 Mutation pro Kanal \u00b7 Video vorab ins Supabase-Hosting.",
-              }}
-            />
-          </div>
-
-          {/* ---------------- RIGHT: autopilot, social, calendar, analytics ---------------- */}
-          <div className="grid content-start gap-5 xl:max-h-[calc(100vh-7rem)] xl:overflow-y-auto xl:pr-2">
-            <div ref={postRef} className="scroll-mt-28">
-              <AutopilotPanel
-                config={apConfig}
-                onConfig={setApConfig}
-                running={apRunning}
-                stats={apStats}
-                log={apLog}
-                queueDepth={apQueueDepth}
-                posting={apPosting}
-                canStart={canAutostart}
-                blockers={autopilotBlockers}
-                hasKey={lakeStatus.hasApiKey}
-                credits={lakeStatus.credits?.total ?? null}
-                bufferHasKey={bufferStatus.hasApiKey}
-                bufferChannels={bufferStatus.accounts.filter((a) => a.status !== "disconnected").length}
-                onStart={startAutopilot}
-                onStop={() => stopAutopilot(false)}
-              />
-            </div>
-
-            <PostlakeAccounts
-              status={lakeStatus}
-              posts={lakePosts}
-              loading={lakeLoading}
-              prefs={prefs}
-              onPrefs={setPrefs}
-              onRefresh={() => void syncSocial()}
-            />
-
-            <BufferAccounts
-              status={bufferStatus}
-              posts={lakePosts}
-              loading={lakeLoading}
-              prefs={prefs}
-              onPrefs={setPrefs}
-              onRefresh={() => void syncSocial()}
-            />
-
-            <div ref={calendarRef} className="scroll-mt-28">
-              <PostlakeCalendar
-                posts={lakePosts}
-                timezone={prefs.timezone}
-                loading={lakeLoading}
-                onPostsChange={setLakePosts}
-                onRefresh={() => void syncSocial()}
-              />
-            </div>
-
-            <div ref={analyticsRef} className="scroll-mt-28">
-              <PostlakeAnalytics posts={lakePosts} />
-            </div>
-          </div>
+          <OutputPanel
+            phase={phase}
+            items={items}
+            placeholderCount={10}
+            zip={zip}
+            elapsed={elapsed}
+            activeIndex={activeIndex}
+            activeProgress={activeProgress}
+            disabled={busy}
+            onBuildZip={buildZip}
+            onRenderOne={renderOne}
+          />
         </div>
 
         <footer className="mt-12 flex flex-wrap items-center justify-between gap-3 border-t border-coal-700/70 pt-5 pb-[env(safe-area-inset-bottom)]">
@@ -1907,7 +921,7 @@ export default function App() {
             </span>
           </div>
           <p className="font-mono text-[9.5px] tracking-wider text-coal-500">
-            SHORTSFACTORY · CLIP MILL + BUFFER/POSTLAKE AUTOPILOT — NO FFMPEG · NO MERCY
+            SHORTSFACTORY · CLIP MILL — NO MERCY
           </p>
         </footer>
       </main>

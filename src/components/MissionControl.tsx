@@ -13,7 +13,6 @@ import {
   Play,
   RefreshCw,
   RotateCw,
-  Send,
   Sparkles,
   Timer,
   TriangleAlert,
@@ -21,12 +20,9 @@ import {
   Zap,
 } from "lucide-react";
 import Section from "./Section";
-import DispatchChooser, { type ProviderReadiness } from "./DispatchChooser";
 import { cn } from "../utils/cn";
 import type { LocalRenderItem, Phase, RenderStage } from "../lib/types";
 import { STAGES, stageIndex } from "../lib/types";
-import type { PostMode } from "../lib/postlake";
-import type { DispatchProvider } from "../lib/dispatch";
 import { formatBytes, formatClock, formatDuration } from "../lib/media";
 
 export interface ZipState {
@@ -347,14 +343,8 @@ export function OutputPanel({
   activeIndex,
   activeProgress,
   disabled = false,
-  postMode,
-  onPostMode,
   onBuildZip,
   onRenderOne,
-  onPostItems,
-  dispatchDefault,
-  postlakeReady,
-  bufferReady,
 }: {
   phase: Phase;
   items: LocalRenderItem[];
@@ -364,26 +354,12 @@ export function OutputPanel({
   activeIndex: number | null;
   activeProgress: number;
   disabled?: boolean;
-  postMode: PostMode;
-  onPostMode: (mode: PostMode) => void;
   onBuildZip: () => void;
   onRenderOne: (index: number) => void;
-  onPostItems: (targetItems: LocalRenderItem[], via: DispatchProvider) => void;
-  dispatchDefault: DispatchProvider;
-  postlakeReady: ProviderReadiness;
-  bufferReady: ProviderReadiness;
 }) {
   const [preview, setPreview] = useState<LocalRenderItem | null>(null);
-  const [chooserTargets, setChooserTargets] = useState<LocalRenderItem[] | null>(null);
   const doneCount = items.filter((r) => r.status === "done").length;
-  const postingCount = items.filter((r) => r.posting).length;
-  const postedCount = items.filter((r) => r.posted).length;
   const busy = phase === "preparing" || phase === "rendering";
-
-  const askProvider = (targets: LocalRenderItem[]) => {
-    if (targets.length === 0 || postingCount > 0) return;
-    setChooserTargets(targets);
-  };
 
   const cells = useMemo<(LocalRenderItem | null)[]>(() => {
     if (items.length > 0) return items;
@@ -526,40 +502,9 @@ export function OutputPanel({
               <div className="mt-2 grid gap-2">
                 <StageStepper status={item.status} />
 
-                {/* per-unit render + post controls */}
+                {/* per-unit render controls */}
                 {(item.status === "staged" || item.status === "done" || item.status === "error") && (
                   <div className="grid gap-1.5">
-                    {item.status === "done" &&
-                      (item.posting ? (
-                        <button
-                          type="button"
-                          disabled
-                          className="bg-heat flex min-h-[34px] w-full cursor-wait items-center justify-center gap-1.5 border border-volt-400 px-2 py-1.5 font-mono text-[9.5px] font-bold tracking-widest text-coal-950 opacity-70"
-                        >
-                          <Loader2 className="size-3 animate-spin" strokeWidth={2.5} /> POSTE …
-                        </button>
-                      ) : item.posted ? (
-                        <div className="flex min-h-[34px] w-full items-center justify-center gap-1.5 border border-volt-400/60 bg-volt-400/10 px-2 py-1.5 font-mono text-[9.5px] font-bold tracking-widest text-volt-300">
-                          <Check className="size-3" strokeWidth={2.5} /> GEPOSTET
-                          {item.postedVia ? ` · ${item.postedVia === "buffer" ? "BUFFER" : "POSTLAKE"}` : ""}
-                        </div>
-                      ) : (
-                        <button
-                          type="button"
-                          onClick={() => askProvider([item])}
-                          disabled={postingCount > 0}
-                          title="Versandweg wählen: Buffer oder Postlake"
-                          className="bg-heat flex min-h-[34px] w-full items-center justify-center gap-1.5 border border-volt-400 px-2 py-1.5 font-mono text-[9.5px] font-bold tracking-widest text-coal-950 transition-opacity hover:opacity-90 disabled:cursor-wait disabled:opacity-40"
-                        >
-                          <Send className="size-3" strokeWidth={2.5} />{" "}
-                          {item.postError ? "ERNEUT POSTEN" : "POST"}
-                        </button>
-                      ))}
-                    {item.status === "done" && item.postError && !item.posting && (
-                      <p className="font-mono text-[8.5px] leading-snug text-rose-err">
-                        {item.postError}
-                      </p>
-                    )}
                     <button
                       type="button"
                       onClick={() => onRenderOne(item.index)}
@@ -610,61 +555,6 @@ export function OutputPanel({
                 <Timer className="size-3.5 text-coal-400" />
                 {formatClock(elapsed)}
               </span>
-            )}
-            {doneCount > 0 && (
-              <div
-                role="group"
-                aria-label="Post-Modus"
-                title="SOFORT: Videos gehen direkt nach dem Klick raus. · PLANEN: belegt automatisch die nächsten freien Slots (Standard 06:00 & 20:00 Berlin)."
-                className="flex divide-x divide-coal-600 border border-coal-600 bg-coal-850"
-              >
-                {(["now", "scheduled"] as PostMode[]).map((m) => {
-                  const active = postMode === m;
-                  return (
-                    <button
-                      key={m}
-                      type="button"
-                      aria-pressed={active}
-                      onClick={() => onPostMode(m)}
-                      className={cn(
-                        "flex min-h-[44px] items-center gap-1.5 px-2.5 font-display text-[11px] font-black tracking-tight uppercase transition-colors sm:px-3",
-                        active
-                          ? "bg-heat text-coal-950"
-                          : "text-coal-400 hover:text-volt-300"
-                      )}
-                    >
-                      {m === "now" ? (
-                        <Zap className="size-3" strokeWidth={2.6} />
-                      ) : (
-                        <Timer className="size-3" strokeWidth={2.4} />
-                      )}
-                      {m === "now" ? "Sofort" : "Planen"}
-                    </button>
-                  );
-                })}
-              </div>
-            )}
-            {doneCount > 0 && (
-              <button
-                type="button"
-                onClick={() => askProvider(items.filter((i) => i.status === "done"))}
-                disabled={postingCount > 0}
-                title="Versandweg wählen: Buffer oder Postlake"
-                className="bg-heat flex min-h-[44px] items-center gap-2 border border-volt-400 px-4 py-2.5 font-display text-sm font-black tracking-tight text-coal-950 uppercase transition-opacity hover:opacity-90 disabled:opacity-60"
-              >
-                {postingCount > 0 ? (
-                  <>
-                    <Loader2 className="size-4 animate-spin" strokeWidth={2.5} />
-                    Poste {postingCount}/{doneCount}…
-                  </>
-                ) : (
-                  <>
-                    <Send className="size-4" strokeWidth={2.5} />
-                    Post all · {doneCount} Video{doneCount === 1 ? "" : "s"}
-                    {postedCount > 0 ? ` (${postedCount} ✓)` : ""}
-                  </>
-                )}
-              </button>
             )}
             {zip.url && zip.name ? (
               <a
@@ -732,21 +622,6 @@ export function OutputPanel({
       )}
 
       {preview && <VideoModal item={preview} onClose={() => setPreview(null)} />}
-
-      <DispatchChooser
-        open={chooserTargets !== null}
-        title={chooserTargets && chooserTargets.length > 1 ? `Post all · ${chooserTargets.length} Videos` : "Video posten"}
-        subtitle={`${postMode === "now" ? "SOFORT" : "SLOTS PLANEN"} · WÄHLE DEN VERSANDWEG`}
-        postlake={postlakeReady}
-        buffer={bufferReady}
-        defaultProvider={dispatchDefault}
-        onPick={(via) => {
-          const targets = chooserTargets || [];
-          setChooserTargets(null);
-          if (targets.length > 0) onPostItems(targets, via);
-        }}
-        onClose={() => setChooserTargets(null)}
-      />
     </Section>
   );
 }
