@@ -626,6 +626,11 @@ export async function renderLocal(opts: RenderJobOptions): Promise<LocalRenderRe
 
     const rawBlob = new Blob(chunks, { type: mimeType.split(";")[0] || "video/mp4" });
     if (rawBlob.size === 0) throw new Error("recorder produced an empty file");
+    /* CRASH-FIX: drop the per-chunk references before the heavy ffmpeg.wasm
+       pass — rawBlob keeps the data alive, but the pinned chunk array would
+       otherwise hold a second full copy of the capture in memory exactly at
+       the pipeline's memory peak (batch renders on iOS/Safari). */
+    chunks.length = 0;
 
     /* The browser's own capture timing can never be perfectly even (see
        cfr.ts for why) — re-encode with ffmpeg.wasm to force a genuinely
